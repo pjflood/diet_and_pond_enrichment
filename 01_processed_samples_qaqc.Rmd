@@ -1,0 +1,602 @@
+---
+title: "01_processed_samples_qaqc"
+author: "Peter Flood"
+date: "2024-03-04"
+output: 
+  html_document:
+    toc: true
+    df_print: paged
+    number_sections: true
+  html_notebook:
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+# Load libraries
+```{r}
+library(tidyverse) #data manipulation
+```
+
+# Read in data
+Read in raw data and standardize column names
+These data are the result of laboratory processing of field samples
+```{r}
+#read in organic material (om), this is somewhat of a misnomer
+#these are basal resources in the food web
+processed.om<-read.csv(file = "Data/Processed Samples/Processed_Samples_08_10_2020_om.csv", header = T)
+colnames(processed.om)<-c("Date", "Year", "Slough", "Site", "Habitat", "Species", "ID", 
+                          "Freezer", "Tube_Weight", "Total_Mass", "Comments", "Sorted", "neg_80_freezer", 
+                          "Freeze_Dried", "Dried", "Crushed", "Isotope", "Decarb", "Entered_by", "Checked_by")
+
+
+#read in and set colnames for invert file
+processed.inverts<-read.csv(file = "Data/Processed Samples/Processed_Samples_08_10_2020_inverts.csv", header = T)
+colnames(processed.inverts)<-c("Date", "Year", "Season", "Slough", "Site", "Habitat", "Method",
+                               "Species", "ID", "Count", "Wet_Weight", "Comments", "Entered_by", "Checked_by", 
+                               "Sorted", "neg_80_freezer", "Freeze_Dried", "Dried", "Crushed", "Isotope", "Decarb")
+
+#read in and set colnames for vert file
+processed.verts<-read.csv(file = "Data/Processed Samples/Processed_Samples_08_10_2020_verts.csv", header = T)
+colnames(processed.verts)<-c("Date", "Year", "Season", "Slough", "Site", "Habitat", "Method",
+                             "Species", "ID", "Length", "Wet_Weight", "Sex", "Stomach_Kept",
+                             "Comments", "Entered_by", "Checked_by", "Sorted", "neg_80_freezer", 
+                             "Freeze_Dried", "Dried", "Crushed", "Isotope", "Decarb")
+
+#make sure there aren't other random columns being read in by selecting on those we want
+processed.verts<-select(processed.verts, c(Date, Year, Season, Slough, Site, Habitat, Method,
+                                           Species, ID, Length, Wet_Weight, Sex, Stomach_Kept,
+                                           Comments, Entered_by, Checked_by, Sorted, neg_80_freezer, 
+                                           Freeze_Dried, Dried, Crushed, Isotope, Decarb))
+
+processed.cray<-read.csv(file = "Data/Processed Samples/Processed_Samples_08_10_2020_crayfish.csv", header = T)
+colnames(processed.cray)<-c("Date", "Year", "Season", "Slough", "Site", "Habitat",
+                            "Method", "Species", "ID", "Length", "Wet_Weight", "Sex", "Comments", "Sorted", "neg_80_freezer",
+                            "Freeze_Dried", "Dried", "Crushed", "Isotope", "Decarb", "Entered_by", "Checked_by")
+
+#There's still an issue with reading in these data related to the *s in the excel file
+processed.zoo<-read.csv(file = "Data/Processed Samples/Processed_Samples_08_10_2020_zooplankton.csv", header = T)
+colnames(processed.zoo)<-c("Month", "Year", "Slough", "Site", "Habitat", "Species", "ID", "Count", "Comments", "Sorted",
+                           "neg_80_freezer", "Freeze_Dried", "Dried", "Isotope")
+
+
+```
+
+# Merge and Organize
+Create a new column, Sample_Type, for each data set to allow for easy sorting down the road
+```{r}
+processed.om$Sample_Type<-"om"
+processed.cray$Sample_Type<-"cray"
+processed.inverts$Sample_Type<-"invert"
+processed.verts$Sample_Type<-"vert"
+processed.zoo$Sample_Type<-"zooplankton"
+```
+
+Join these data frames together and reorganize
+```{r}
+#join these data frames together
+raw.processed.samples<-bind_rows(processed.om, processed.cray, processed.inverts, 
+                                 processed.verts, processed.zoo) %>%
+  arrange(Year, Season, Slough, Site, Habitat, Species, Method)
+
+#drop the year column, will reattached
+raw.samples.no.year<-select(raw.processed.samples, -Year)
+sort(raw.samples.no.year$Date, decreasing = F)
+samples.no.date<-filter(raw.samples.no.year, Date=="")
+
+#split the date column into month, day, year 
+raw.samples.date.sep<-separate(raw.samples.no.year, col="Date", into = c("Month", "Day", "Year"), sep = "/")
+
+#change this year column to the old year column so that every entry has a year
+raw.samples.date.sep$Year<-raw.processed.samples$Year
+
+#check for erroneous values
+sort(raw.samples.date.sep$Year, decreasing = T) #shows one entry is 2109, not 2019
+sort(raw.samples.date.sep$Year, decreasing = F)
+
+#fixing 2109 error
+raw.samples.date.sep$Year[raw.samples.date.sep$Year==2109]<-2019
+
+samples.sorted<-raw.samples.date.sep
+```
+
+Need to standardize levels of various factors
+Check for data entry errors among factor levels
+```{r}
+#Month
+month.error<-filter(samples.sorted, !Month %in% c(1:12)) 
+levels(as.factor(samples.sorted$Month)) #What is in the month column anyway?
+#fix month errors
+samples.sorted$Month<-replace(samples.sorted$Month, samples.sorted$Month %in% c("2018", "2019"), "")
+samples.sorted$Month<-replace(samples.sorted$Month, samples.sorted$Month == "N-18", 11)
+samples.sorted$Month[samples.sorted$Year==2019 & grepl("Mi", samples.sorted$ID)]<-3
+samples.sorted$Month[samples.sorted$Year==2018 & grepl("Mi", samples.sorted$ID)]<-12
+#Set missing months for SRS wet-season sites to March
+samples.sorted$Month[samples.sorted$Year==2019 & samples.sorted$Month=="" & samples.sorted$Slough=="SRS"] <- 3
+#Set missing months for TSL wet-season sites to April
+samples.sorted$Month[samples.sorted$Year==2019 & samples.sorted$Month=="" & samples.sorted$Slough=="TSL"] <- 4
+#Set missing months for dry-season samples to November
+samples.sorted$Month[samples.sorted$Year==2018 & samples.sorted$Month==""] <- 11
+
+
+#Day
+day.error<-filter(samples.sorted, !Day %in% c(1:31))
+levels(as.factor(samples.sorted$Day)) 
+#some samples were missing dates
+#2019 (dry season) samples from march are being set to the 15th
+samples.sorted$Day[samples.sorted$Year==2019 & is.na(samples.sorted$Day) & samples.sorted$Month == 3] <- 15
+#Do the same for 2018 (wet season) for each month
+samples.sorted$Day[samples.sorted$Year==2018 & is.na(samples.sorted$Day)] <- 15
+#TSL 2019
+
+
+#Year
+year.error<-filter(samples.sorted, !Year %in%  c(2018, 2019))
+
+#slough
+slough.error<-filter(samples.sorted, !Slough %in% c("TSL", "SRS"))
+#2 entries are not labeled as SRS or TSL
+#Both are from TSL, fixing that here
+samples.sorted$Slough[samples.sorted$Slough %in% c("","PMD", "MDW")]<-"TSL"
+#Re-run slough.error to make sure the new output has 0 rows
+
+#Check for season errors
+season.error<-filter(samples.sorted, !Season %in% c("WET", "DRY"))
+
+#Set season based on year
+samples.sorted$Year<-as.numeric(samples.sorted$Year)
+samples.sorted$Season<-as.character(samples.sorted$Season)
+samples.sorted$Season[samples.sorted$Year==2018]<-"Wet"
+samples.sorted$Season[samples.sorted$Year==2019]<-"Dry"
+
+#Check for any remaining season errors, note capitalization is different
+season.error<-filter(samples.sorted, !Season %in% c("Wet", "Dry"))
+
+#Going to do method next, first want to separate TT and the subsequent number 
+#This will allow for better calculations of density estimates for TT data if we want to 
+#go that route at any point
+
+#First, I need to edit in something between TT and the number to separate by
+samples.sorted$Method<-gsub("1", "_1", samples.sorted$Method)
+samples.sorted$Method<-gsub("2", "_2", samples.sorted$Method) 
+samples.sorted$Method<-gsub("3","_3", samples.sorted$Method)
+
+levels(as.factor(samples.sorted$Method))
+
+#separate method and throw based on "_"
+samples.sorted<-separate(samples.sorted, col = "Method", into = c("Method", "Throw"), sep = "_")
+
+#check for throw errors
+throw.error<-filter(samples.sorted, Method == "TT" & !Throw %in% c(1,2,3) | Method != "TT" & !is.na(Throw))
+
+#check for method errors
+method.error<-filter(samples.sorted, !Method %in% c("EFISH", "TT", "MT", "FR", "DF", "FT"))
+
+#many samples were labelled "HAND" these are organisms and should more accurately be labelled free range
+samples.sorted$Method[samples.sorted$Method=="HAND"]<-"FR"
+#adding in FT (funnel trap) for zooplankton samples
+samples.sorted$Method[grepl("Mi", samples.sorted$ID)]<-"FT"
+#organic matter samples don't have a method, these I am also going to label as FR
+samples.sorted$Method[is.na(samples.sorted$Method)]<-"FR"
+#EFISH spelled as EFSISH, correcting
+samples.sorted$Method[samples.sorted$Method=="EFSISH"]<-"EFISH"
+#re-run method.error to make sure all error were corrected (0 rows in resulting object)
+
+#now that method is in order, we can work on site
+#work on the different levels of Site, if they are not efish, standardize 
+#check errors for everything that isn't EFISH, these should all be the the alligator holes/ponds we targeted
+#tt = throw trap
+tt.site.error<-filter(samples.sorted, !Site %in% c("LJB", "CPB", "AH11", "AH13", "AHWG16", # 5 SRS Sites
+                                                "AH02", "AH03", "AH05", "AH09", "AHMDB") & # 5 TSL Sites
+                     Method!="EFISH")
+
+levels(as.factor(tt.site.error$Site))
+
+#check general site errors, EFISHing was done at sites besides our focal sites
+#They were labeled based on the MDW site or closest MDW site/location
+site.error<-filter(samples.sorted, !Site %in% c("LJB", "CPB", "AH11", "AH13", "AHWG16", # 5 SRS Sites
+                                                "AH02", "AH03", "AH05", "AH09", "AHMDB"))# 5 TSL Sites
+                   
+
+levels(as.factor(site.error$Site))
+
+#remove hyphens from site names
+samples.sorted$Site<-gsub("-", "", samples.sorted$Site)
+
+#Correct/ consolidate site names
+samples.sorted$Site<-replace(samples.sorted$Site, samples.sorted$Site=="AH WG16", "AHWG16")
+samples.sorted$Site<-replace(samples.sorted$Site, samples.sorted$Site=="AH2", "AH02")
+samples.sorted$Site<-replace(samples.sorted$Site, samples.sorted$Site=="AH3", "AH03")
+samples.sorted$Site<-replace(samples.sorted$Site, samples.sorted$Site=="AH5", "AH05")
+samples.sorted$Site<-replace(samples.sorted$Site, samples.sorted$Site=="AH9", "AH09")
+samples.sorted$Site<-replace(samples.sorted$Site, samples.sorted$Site %in% c("CATB", "CATPONDB", "AHCFP", "AH CATB"), "CPB")
+samples.sorted$Site<-replace(samples.sorted$Site, samples.sorted$Site %in% c("AHMBD", "AHMDP"), "AHMDB")
+samples.sorted$Site<-replace(samples.sorted$Site, samples.sorted$Site %in% c("LVG16", "WG16"), "AH02")
+samples.sorted$Site<-replace(samples.sorted$Site, samples.sorted$Site %in% c("BJB", "LBJ"), "LJB")
+samples.sorted$Site<-replace(samples.sorted$Site, samples.sorted$Site=="BJBAH", "AHBJB")
+samples.sorted$Site<-replace(samples.sorted$Site, samples.sorted$Site %in% c("M. DITCH", "MADIERA DITCH"), "MD")
+samples.sorted$Site<-replace(samples.sorted$Site, samples.sorted$Site %in% c("HYDRO E 37>(N)39", "HYDRO E 37.9", 
+                                                                             "HYDRO E 37N", "HYDRO E 37N>9", "HYDRO E 37>9"), "37")
+
+samples.sorted$Site<-replace(samples.sorted$Site, samples.sorted$Site=="TRAIL @ 8A", "8A")
+samples.sorted$Site<-replace(samples.sorted$Site, samples.sorted$Site=="MBD", "MDB")
+
+
+
+levels(as.factor(samples.sorted$Site))
+
+#re-order column order
+samples.sorted<-select(samples.sorted, ID, Species, Sample_Type, Season, Month, Day, Year, Slough, Site, Habitat, 
+                       Method, Throw, Length, Wet_Weight, Sex, Stomach_Kept, Comments, everything())
+
+#I already know the habitat variable needs work 
+#Look at the various levels to get an idea of how to standardize them
+levels(as.factor(samples.sorted$Habitat))
+
+#explore hab levels I'm not immediate sure what they are
+misc.hab.samples<-filter(samples.sorted, Habitat %in% c("", "?", "4", "M-NP", "M-P", "MAR-NP", "NP-M")) %>%
+  arrange(Habitat)
+#all the rows w/o a habitat are EFISH samples, I'll have to label their habitat based on the site label
+#Habitat=="?" are minnow traps from BJB, going to leave these, no way to know what the habitat was at this point
+#Habitat=="4" must be from efishing in the pond at AHWG16
+#M-NP, MAR-NP, and NP-M are the face of the drift fence from the marsh - near pond border facing into the marsh
+#will label as marsh
+#M-P are the face fo the drift fence from the marsh that face the pond, will label as marsh
+
+#need to investigate what "NP-P" and "P-NP" are too - pretty sure they're NP
+p.np.samples<-filter(samples.sorted, Habitat %in% c("NP-P", "P-NP"))
+mn.samples<-filter(samples.sorted, Habitat == "MN")
+no.hab.samples<-filter(samples.sorted, Habitat == "") #need to come back to these, skipping for now
+#these were the face of the drift fence in the near pond that faced into the pond 
+#will relabel these to NP
+samples.sorted$Habitat<-as.character(samples.sorted$Habitat)
+
+#change various labelling that are all Marsh (Spikerush) to Marsh
+samples.sorted$Habitat<-replace(samples.sorted$Habitat, samples.sorted$Habitat %in% 
+                                  c("009->10+", "009->10", "E MARSH", "EMARSH", "MARSH", "N->HYDROSTATION", "N->SRS2A", "TRAIL",
+                                    "ADJACENT MARSH AND EDGES OF MANGROVE ISLAND", "M-P", "M-NP", "MAR-NP", "NP-M",
+                                    "009-10+", "B", "E-MARSH", "MARSH-T3", "MARSH #2", "MARSH 2", "N.HYDROSTATION"
+                                  ),
+                                "Marsh")
+
+#Change variations of Near Pond to NP
+samples.sorted$Habitat<-replace(samples.sorted$Habitat, samples.sorted$Habitat %in% 
+                                  c("NEAR POND", "NP", "NP-P", "P-NP", "NEAR POND-T1", "NEAR POND-T2"),
+                                "NP")
+
+#Change various labels that represent the drift fence samples that were on the marsh - near pond border to edge
+samples.sorted$Habitat<-replace(samples.sorted$Habitat, samples.sorted$Habitat %in% 
+                                  c("EDGE", "M-NP", "MAR-NP", "NP-M", "MN"),
+                                "Edge")
+
+#Change various labels that all represent Pond
+samples.sorted$Habitat<-replace(samples.sorted$Habitat, samples.sorted$Habitat %in% 
+                                  c("POND", "CATB", "4", "POND TRAIL", "CREEK", "POND-T1", "POND-T2", "POND-T3", "POND ADJ MARSH",
+                                    "POND-MT", "AH"),
+                                "Pond")
+
+#Change various labels that represent mangroves to Mangrove
+samples.sorted$Habitat<-replace(samples.sorted$Habitat, samples.sorted$Habitat %in% 
+                                  c("MANGROVE", "MANG", "MANGROVEROVE"),
+                                "Mangrove")
+
+#Change various labels that represent sawgrass ridges to "Sawgrass"
+samples.sorted$Habitat<-replace(samples.sorted$Habitat, samples.sorted$Habitat %in% 
+                                  c("SAWGRASS", "SAWGRASS MARSH", "SAWGRASS MARSH MARSH"),
+                                "Sawgrass")
+#fixing the habitat levels for those that are blank based on the site label
+#they are all efishing so the site label is distinct for marsh vs pond
+#missing that convert to Pond
+samples.sorted$Habitat[samples.sorted$Site %in% c("BL-MD-B", "AH59A", "AH-CFP-B", "AH-SC", "AH12L", "AHBJB", "LJB", "CPB")]<-"Pond"
+
+
+#missing that convert to marsh
+samples.sorted$Habitat[samples.sorted$Site %in% c("23A", "HYDRO E 37->(N)39", "HYDRO E 37->9", "TRAIL @8A", '8A', "37", "TSC", 
+                                                  "8B", "MDC")]<-"Marsh"
+
+#need to take care of the empty and NA habitat levels, these are all EFISH
+#empty - Pond
+samples.sorted<-samples.sorted %>% group_by(Habitat) %>% 
+  mutate(Habitat = ifelse(any(grepl("AH", Site)) & Habitat == "", "Pond", Habitat))
+#NA - Pond
+samples.sorted<-samples.sorted %>% group_by(Habitat) %>% 
+  mutate(Habitat = ifelse(any(grepl("AH", Site)) & is.na(Habitat), "Pond", Habitat))
+
+#empty - Marsh
+samples.sorted<-samples.sorted %>% group_by(Habitat) %>% 
+  mutate(Habitat = ifelse(any(!grepl("AH", Site)) & Habitat == "", "Marsh", Habitat))
+#NA - Marsh
+samples.sorted<-samples.sorted %>% group_by(Habitat) %>% 
+  mutate(Habitat = ifelse(any(!grepl("AH", Site)) & is.na(Habitat), "Marsh", Habitat))
+
+#There are some Habitat==NA, looking at what those are here
+hab.na<-filter(samples.sorted, is.na(Habitat))
+
+
+#check levels again, only ?, Marsh, NP, Edge, Pond, Mangrove, and Sawgrass should remain
+levels(as.factor(samples.sorted$Habitat))
+
+#after running this, change Site==AHBJB to Site==BJB, I wanted to retain the AH until now to switch the habitat to Pond for those data
+samples.sorted$Site<-replace(samples.sorted$Site, samples.sorted$Site=="AHBJB", "BJB")
+levels(as.factor(samples.sorted$Site))
+
+#some species IDs are 1 instead of 01 for example, need to correct this
+#First need to separate spp abbreviations and ID's, then I can edit the numbers
+samples.sorted.Id.split<-separate(samples.sorted, col = ID, into = c("id_abbr", "id_num"), sep = "(?<=[A-Za-z])(?=[0-9])")
+
+#check the levels of id_abbr
+levels(as.factor(samples.sorted.Id.split$id_abbr))
+filter(samples.sorted.Id.split, id_abbr=="")
+
+#remove * from id_num
+samples.sorted.Id.split$id_num<-(gsub("**", "", samples.sorted.Id.split$id_num, fixed = T))
+samples.sorted.Id.split$id_num<-(gsub("*", "", samples.sorted.Id.split$id_num, fixed = T))
+#check to see if any * remain
+sort(samples.sorted.Id.split$id_num, decreasing = F)
+sort(samples.sorted.Id.split$id_num, decreasing = T)
+#this is a specific sample that has * in the csv file
+Mi166<-filter(samples.sorted.Id.split, id_abbr=="Mi" & id_num==166) #looks like they are both gone now
+id.ast<-filter(samples.sorted.Id.split, grepl("*", id_num, fixed = T))
+
+samples.sorted.Id.split$id_num[samples.sorted.Id.split$id_num==1]<-"01"
+samples.sorted.Id.split$id_num[samples.sorted.Id.split$id_num==2]<-"02"
+samples.sorted.Id.split$id_num[samples.sorted.Id.split$id_num==3]<-"03"
+samples.sorted.Id.split$id_num[samples.sorted.Id.split$id_num==4]<-"04"
+samples.sorted.Id.split$id_num[samples.sorted.Id.split$id_num==5]<-"05"
+samples.sorted.Id.split$id_num[samples.sorted.Id.split$id_num==6]<-"06"
+samples.sorted.Id.split$id_num[samples.sorted.Id.split$id_num==7]<-"07"
+samples.sorted.Id.split$id_num[samples.sorted.Id.split$id_num==8]<-"08"
+samples.sorted.Id.split$id_num[samples.sorted.Id.split$id_num==9]<-"09"
+
+#Peri is also abbreviated Pr here, but PR everywhere else, changing to PR
+samples.sorted.Id.split$id_abbr[samples.sorted.Id.split$id_abbr=="Pr"]<-"PR"
+
+
+#recombine id_abbr and id_num into ID
+samples.sorted.Id.unite<-unite(samples.sorted.Id.split, col = "ID", c(id_abbr, id_num), sep = "")
+#now re-write samples.sorted with this object
+samples.sorted<-samples.sorted.Id.unite %>% arrange(Year, Season, Slough, Site, Habitat, Species, ID, Sample_Type)
+
+#Need to organize/consolidate different Species codes
+levels(as.factor(samples.sorted$Species))
+no.species<-filter(samples.sorted, Species=="") #no idea, this seems like it's a blank row
+
+#wtf is Automeris fabricus?
+autfab<-filter(samples.sorted, Species == "AUTOMERIUS FABIRCUS") #no clue... some invert I guess?
+
+#make replacements
+samples.sorted$Species<-replace(samples.sorted$Species, samples.sorted$Species=="Peri Sweaters", "PEREPI")
+samples.sorted$Species<-replace(samples.sorted$Species, samples.sorted$Species=="Peri Mat", "PERMAT")
+samples.sorted$Species<-replace(samples.sorted$Species, samples.sorted$Species=="Peri Sweaters", "PEREPI")
+samples.sorted$Species<-replace(samples.sorted$Species, samples.sorted$Species=="Peri", "PERIPH")
+samples.sorted$Species<-replace(samples.sorted$Species, samples.sorted$Species %in% c("Algae Ball", "ALGAE BALL"), "ALGBAL")
+samples.sorted$Species<-replace(samples.sorted$Species, samples.sorted$Species %in% c("TYHPA", "TYPHA C", "TYPHA/TYSPP", "TYPSPP"), 
+                                "TYPDOM")
+samples.sorted$Species<-replace(samples.sorted$Species, samples.sorted$Species %in% c("ELECEL J", "ELECEL U"), "ELECEL")
+```
+
+
+## Create Size Class Variable
+```{r}
+#size classes are only assigned to vertebrate taxa based on length
+#standard length for fishes, snout-vent length for herps
+
+#Southern Cricket Frog, 
+samples.sorted$size_class[samples.sorted$Species=='ACRIPT']<-'A.gry1'
+
+#Yellow bullhead, Ameiurus natalis 
+samples.sorted$size_class[samples.sorted$Species=='AMENAT' & samples.sorted$Length<=96]<-'A.nat1'
+samples.sorted$size_class[samples.sorted$Species=='AMENAT' & samples.sorted$Length>96 & samples.sorted$Length<=135]<-'A.nat2'
+samples.sorted$size_class[samples.sorted$Species=='AMENAT' & samples.sorted$Length>135 & samples.sorted$Length<=175]<-'A.nat3'
+samples.sorted$size_class[samples.sorted$Species=='AMENAT' & samples.sorted$Length>175]<-'A.nat4'
+#check to make sure its working 
+filter(samples.sorted, Species == 'AMENAT') %>% select(size_class) #checks out
+
+#Brown bullhead, Ameiurus nebulosus 
+samples.sorted$size_class[samples.sorted$Species=='AMENEB' & samples.sorted$Length<=96]<-'A.neb1'
+samples.sorted$size_class[samples.sorted$Species=='AMENEB' & samples.sorted$Length>96 & samples.sorted$Length<=135]<-'A.neb2'
+samples.sorted$size_class[samples.sorted$Species=='AMENEB' & samples.sorted$Length>135 & samples.sorted$Length<=175]<-'A.neb3'
+samples.sorted$size_class[samples.sorted$Species=='AMENEB' & samples.sorted$Length>175]<-'A.neb4'
+
+#Bowfin, Amia calva
+samples.sorted$size_class[samples.sorted$Species=='AMICAL' & samples.sorted$Length<=70]<-'A.cal1'
+samples.sorted$size_class[samples.sorted$Species=='AMICAL' & samples.sorted$Length>70]<-'A.cal2'
+
+#Oscar, Astronotus ocellatus
+samples.sorted$size_class[samples.sorted$Species=='ASTOCE']<-'A.oce1'
+
+#Two-toed Amphiuma, Amphiuma means
+samples.sorted$size_class[samples.sorted$Species=='AMPMEA']<-'A.mea1'
+
+#American Eel, Anguilla rostrata
+samples.sorted$size_class[samples.sorted$Species=='ANGROS']<-'A.ros1'
+
+#Pirate Perch, Aphredoderus sayanus
+samples.sorted$size_class[samples.sorted$Species=='APHSAY']<-'A.say1'
+
+#Pike killifish, Belonesox belizanus
+samples.sorted$size_class[samples.sorted$Species=='BELBEL' & samples.sorted$Length<=64]<-'B.bel1'
+samples.sorted$size_class[samples.sorted$Species=='BELBEL' & samples.sorted$Length>64]<-'B.bel2'
+
+#Black Acara, Cichlasoma bimaculatum
+samples.sorted$size_class[samples.sorted$Species=='CICBIM']<-'C.bim1'
+
+#Jaguar Guapote, Cichlasoma managuense
+samples.sorted$size_class[samples.sorted$Species=='CICMAN']<-'C.man1'
+
+#Peacock Bass, Cichlasoma ocellaris
+samples.sorted$size_class[samples.sorted$Species=='CICOCE']<-'C.oce1'
+
+#Mayan Cichlid, Cichlasoma urophthalmus
+samples.sorted$size_class[samples.sorted$Species=='CICURO' & samples.sorted$Length<=120]<-'C.uro1'
+samples.sorted$size_class[samples.sorted$Species=='CICURO' & samples.sorted$Length>120]<-'C.uro2'
+
+#Walking Catfish, Clarias batrachus
+samples.sorted$size_class[samples.sorted$Species=='CLABAT']<-'C.bat1'
+
+#Sheepshead Minnow, Cyprinodon variegatus
+samples.sorted$size_class[samples.sorted$Species=='CIPVAR']<-'C.var1'
+
+#Everyglades Pygmy Sunfish, Elassoma evergladei
+samples.sorted$size_class[samples.sorted$Species=='ELAEVE']<-'E.eve1'
+
+#Bluespotted Sunfish, Enneacanthus gloriosus
+samples.sorted$size_class[samples.sorted$Species=='ENNGLO']<-'E.glo1'
+
+#Lake Chubsucker, Erimyzon sucetta
+#Two ERISUC weren't measured but estimated lengths are in the comments
+#adding those lengths into the lengths column so they can have a size class
+samples.sorted$Length[samples.sorted$ID %in% c('EU01', 'EU02')]<-c(50, 98)
+#create size classes
+samples.sorted$size_class[samples.sorted$Species=='ERISUC' & samples.sorted$Length<=100]<-'E.suc1'
+samples.sorted$size_class[samples.sorted$Species=='ERISUC' & samples.sorted$Length>100 & 
+                           samples.sorted$Length<=150]<-'E.suc2'
+samples.sorted$size_class[samples.sorted$Species=='ERISUC' & samples.sorted$Length>150]<-'E.suc3'
+
+#Golden Topminnow, Fundulus chrysotus
+samples.sorted$size_class[samples.sorted$Species=='FUNCHR' & samples.sorted$Length<=40]<-'F.chr1'
+samples.sorted$size_class[samples.sorted$Species=='FUNCHR' & samples.sorted$Length>40]<-'F.chr2'
+
+#Redfin Pickerel, Esox americanus 
+samples.sorted$size_class[samples.sorted$Species=='ESOAME']<-'E.ame1'
+
+#Marsh Killifish, Fundulus confluentus
+samples.sorted$size_class[samples.sorted$Species=='FUNCON']<-'F.con1'
+
+#Eastern Mosquitofish, Gambusia holbrooki
+samples.sorted$size_class[samples.sorted$Species=='GAMHOL' & samples.sorted$Length<=17]<-'G.hol1'
+samples.sorted$size_class[samples.sorted$Species=='GAMHOL' & samples.sorted$Length>17]<-'G.hol2'
+
+#African Jewelfish, Hemicrhomis letourneuxi
+samples.sorted$size_class[samples.sorted$Species=='HEMLET']<-'H.let1'
+
+#Least Killifish, Heterandria formosa
+samples.sorted$size_class[samples.sorted$Species=='HETFOR' & samples.sorted$Length<=12]<-'H.for1'
+samples.sorted$size_class[samples.sorted$Species=='HETFOR' & samples.sorted$Length>12]<-'H.for2'
+
+#Brown Hoplo, Hoplosternum littorale 
+samples.sorted$size_class[samples.sorted$Species=='HOPLIT']<-'H.lit1'
+
+#Flagfish, Jordanella floridae
+samples.sorted$size_class[samples.sorted$Species=='JORFLO' & samples.sorted$Length<=18]<-'J.flo1'
+samples.sorted$size_class[samples.sorted$Species=='JORFLO' & samples.sorted$Length>18]<-'J.flo2'
+
+#Brook Silverside, Labidesthes sicculus
+samples.sorted$size_class[samples.sorted$Species=='LABSIC']<-'L.sic1'
+
+#Florida Gar, Lepisosteus platyrhincus
+samples.sorted$size_class[samples.sorted$Species=='LEPPLA' & samples.sorted$Length<=450]<-'L.pla1'
+samples.sorted$size_class[samples.sorted$Species=='LEPPLA' & samples.sorted$Length>450]<-'L.pla2'
+
+#Warmouth, Lepomis gulosus
+samples.sorted$size_class[samples.sorted$Species=='LEPGUL' & samples.sorted$Length<=71]<-'L.gul1'
+samples.sorted$size_class[samples.sorted$Species=='LEPGUL' & samples.sorted$Length>71 & 
+                           samples.sorted$Length<=95]<-'L.gul2'
+samples.sorted$size_class[samples.sorted$Species=='LEPGUL' & samples.sorted$Length>95 & 
+                           samples.sorted$Length<=120]<-'L.gul3'
+samples.sorted$size_class[samples.sorted$Species=='LEPGUL' & samples.sorted$Length>120]<-'L.gul4'
+
+#Bluegill, Lepomis macrochirus
+samples.sorted$size_class[samples.sorted$Species=='LEPMAC']<-'L.mac1'
+
+#Dollar Sunfish, Lepomis marginatus
+samples.sorted$size_class[samples.sorted$Species=='LEPMAR']<-'L.mar1'
+
+#Redear Sunfish, Lepomis microlophus
+#some LEPMIC have a space after LEPMIC in the species column and are omitted
+#correction for that
+samples.sorted$Species[samples.sorted$Species=='LEPMIC ']<-'LEPMIC'
+#size classes
+samples.sorted$size_class[samples.sorted$Species=='LEPMIC' & samples.sorted$Length<=100]<-'L.mic1'
+samples.sorted$size_class[samples.sorted$Species=='LEPMIC' & samples.sorted$Length>100]<-'L.mic2'
+
+#Spotted Sunfish, Lepomis punctatus
+samples.sorted$size_class[samples.sorted$Species=='LEPPUN' & samples.sorted$Length<=40]<-'L.pun1'
+samples.sorted$size_class[samples.sorted$Species=='LEPPUN' & samples.sorted$Length>40 & 
+                           samples.sorted$Length<=90]<-'L.pun2'
+samples.sorted$size_class[samples.sorted$Species=='LEPPUN' & samples.sorted$Length>90]<-'L.pun3'
+
+#Bluefin Killifish, Lucania goodei
+samples.sorted$size_class[samples.sorted$Species=='LUCGOO' & samples.sorted$Length<=17.5]<-'L.goo1'
+samples.sorted$size_class[samples.sorted$Species=='LUCGOO' & samples.sorted$Length>17.5]<-'L.goo2'
+
+#Peacock Eel, Macrognathus siamensis
+samples.sorted$size_class[samples.sorted$Species=='MACSIA']<-'M.sia1'
+
+#Largemouth Bass, Micropterus salmoides
+samples.sorted$size_class[samples.sorted$Species=='MICSAL']<-'M.sal1'
+
+#Inland Silverside, Menidia berylina
+samples.sorted$size_class[samples.sorted$Species=='MENBER']<-'M.ber1'
+
+#Asian Swwamp Eel, Monopterus albus
+#distribution of sizes
+monalb<-filter(samples.sorted, Species == 'MONALB')
+hist(monalb$Length)
+
+#create size classes
+samples.sorted$size_class[samples.sorted$Species=='MONALB' & samples.sorted$Length<=275]<-'M.alb1'
+samples.sorted$size_class[samples.sorted$Species=='MONALB' & samples.sorted$Length>275 & 
+                           samples.sorted$Length<=450]<-'M.alb2'
+samples.sorted$size_class[samples.sorted$Species=='MONALB' & samples.sorted$Length>450 & 
+                           samples.sorted$Length<=625]<-'M.alb3'
+samples.sorted$size_class[samples.sorted$Species=='MONALB' & samples.sorted$Length>625]<-'M.alb4'
+
+#Florida Green Water Snake, Nerodia floridana
+samples.sorted$size_class[samples.sorted$Species=='NERFLO']<-'N.flo1'
+
+#Tadpole Madtom, Noturus gyrinus
+samples.sorted$size_class[samples.sorted$Species=='NOTGYR']<-'N.gyr1'
+
+#Coastal Shiner, Notropis petersoni
+samples.sorted$size_class[samples.sorted$Species=='NOTPET']<-'N.pet1'
+
+#Peninsula Newt, Notophthalmus viridescens
+samples.sorted$size_class[samples.sorted$Species=='NOTVIR']<-'N.vir1'
+
+#Blue Tilapia, Oreochromis aureus
+samples.sorted$size_class[samples.sorted$Species=='OREAUR']<-'O.aur1'
+
+#Sailfin Molly, Poecilia latipinna
+samples.sorted$size_class[samples.sorted$Species=='POELAT' & samples.sorted$Length<=20]<-'P.lat1'
+samples.sorted$size_class[samples.sorted$Species=='POELAT' & samples.sorted$Length>20]<-'P.lat2'
+
+#Everglades Pygmy Siren, Psuedobranchus axanthus
+samples.sorted$size_class[samples.sorted$Species=='PSEAXA']<-'P.axa1'
+
+#Pig Frog, Rana grylio
+samples.sorted$size_class[samples.sorted$Species=='RANATP']<-'R.gry1'
+samples.sorted$size_class[samples.sorted$Species=='RANGRY']<-'R.gry2'
+
+#Greater Siren, Sirens lacertina
+samples.sorted$size_class[samples.sorted$Species=='SIRLAC']<-'S.lac1'
+
+#Spotted Tilapia, Tilapia mariae
+samples.sorted$size_class[samples.sorted$Species=='TILMAR']<-'T.mar1'
+
+#Snook
+samples.sorted$size_class[samples.sorted$Species=="SNOOK"]<-"C.und1"
+
+#Look for rows that still don't have a size class - should only have empcups or damaged specimens
+size_class.error<-filter(samples.sorted, is.na(size_class) & Sample_Type=="vert")
+```
+Export Cleaned Data
+```{r}
+#sort and write out to csv
+samples.sorted %>% arrange(Year, Season, Slough, Site, Habitat, Species, ID, size_class, Sample_Type) %>%
+    write.csv(file = "Outputs/Processed Samples/processed_samples_qaqc.csv", row.names = F)
+
+sample.size<-samples.sorted %>% group_by(Year, Species) %>% summarise(n=n())
+
+write.csv(sample.size, file = "Outputs/Processed Samples/sample_size_year_species.csv", row.names = F)
+
+#To facilitate looking at output
+samples.sorted<-samples.sorted %>% arrange(Year, Species, Slough, Habitat, Site)
+
+#Examining a couple specific groups
+tilmar.2018<-samples.sorted %>% filter(Species=="TILMAR", Year==2018) %>% 
+  arrange(ID)
+
+belbel<-samples.sorted %>% filter(Species == "BELBEL")
+
+```

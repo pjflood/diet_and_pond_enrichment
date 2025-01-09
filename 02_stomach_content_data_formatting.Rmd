@@ -1,0 +1,158 @@
+---
+title: "02_Stomach_Content_Data_Formatting"
+author: "Peter Flood"
+date: "2024-03-04"
+output: 
+  html_document:
+    toc: true
+    df_print: paged
+    number_sections: true
+  html_notebook:
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load libraries
+```{r}
+library(tidyverse) # data manipulation
+```
+
+# Read in raw data
+```{r}
+stomachs.raw <- read_csv("Data/Stomach Contents/dpe_stomach_contents_raw_data.csv")
+
+#remove duplicates
+stomachs.raw <- stomachs.raw %>%
+  distinct() %>% #remove MC28 duplicate empty stomach.
+  rename(Diet.Item = Diet_Item)
+
+```
+
+# Condense prey groups
+This study repeats work from Loftus 2000 and Flood et al. 2023 https://doi.org/10.1016/j.fooweb.2022.e00265
+Therefore, we need to condense prey groups to match to set up comparisons
+```{r}
+#Look at prey groups in raw data
+prey.groups <- levels(as.factor(stomachs.raw$Diet.Item)) %>% as.data.frame()
+
+#condense to prey groups that match prior work
+#Amphipoda
+stomachs.raw$Diet.Item[stomachs.raw$Diet.Item %in% c("Amphipoda ", "Amphipoda  ")] <- "Amphipoda"
+
+#Belo/Naucor
+stomachs.raw$Diet.Item[stomachs.raw$Diet.Item %in% c("Belostoma", "Pelocoris")] <- "Belo/Naucor"
+
+#Centrarchid
+stomachs.raw$Diet.Item[stomachs.raw$Diet.Item %in% c("Elasomma evergladei")] <- "Centrarchid"
+
+
+#"Chironomid", "Chironomid ", and "Chironomid larvae" need to all be "Chironomid"
+stomachs.raw$Diet.Item[stomachs.raw$Diet.Item %in% c("Chironomid ", "Chironomid larvae")] <- "Chironomid"
+
+#Coleoptera
+stomachs.raw$Diet.Item[stomachs.raw$Diet.Item %in% c("Hydrilla", "Cybister")] <- "Coleoptera"
+
+#Copepoda
+stomachs.raw$Diet.Item[stomachs.raw$Diet.Item %in% c("Copepod")] <- "Copepoda"
+
+#Cyprinodontid
+stomachs.raw$Diet.Item[stomachs.raw$Diet.Item %in% 
+                         c("Gambusia holbrooki", "Gambusia hoolbroki", 
+                           "Heterandria formosa", "Lucania goodei")] <- "Cyprinodontid"
+
+#Detritus
+stomachs.raw$Diet.Item[stomachs.raw$Diet.Item %in% c(" Detritus", "Vasc Detritus", "Vascular Detritus")] <- "Detritus"
+
+#Diptera
+stomachs.raw$Diet.Item[stomachs.raw$Diet.Item %in% c("Culicidae")] <- "Diptera"
+
+#Hemiptera
+stomachs.raw$Diet.Item[stomachs.raw$Diet.Item %in% c("Corixidae", "Gerridae", "Hebridae", "Mesovelidae", 
+                                                     "Nepidae", "Notonectidae", "Lubridae")] <- "Hemiptera"
+
+#Hydrachnidia - Aquatic Mites
+stomachs.raw$Diet.Item[stomachs.raw$Diet.Item %in% 
+                         c("Blue Mite", "Brown Mite", "Mite", "Orange Mite", "Red Mite")] <- "Hydrachnidia"
+
+#Hymenoptera
+stomachs.raw$Diet.Item[stomachs.raw$Diet.Item %in% c("Formicidae", "Halictidae")] <- "Hymenoptera"
+
+
+#Misc Invert
+stomachs.raw$Diet.Item[stomachs.raw$Diet.Item %in% c("Misc Insecta", "Flatworm", "Plecoptera")] <- "Misc Invert"
+
+#Mollusca
+stomachs.raw$Diet.Item[stomachs.raw$Diet.Item %in% c("Bivalvia", "Haita spp", "Melanoides", "Mollusca",
+                                                     "Physid Snail", "Planorbella duryi", "PSECOL", "Snail",
+                                                     "Snail  ", "Snail Physid")] <- "Mollusca"
+
+#Odonata
+stomachs.raw$Diet.Item[stomachs.raw$Diet.Item %in% c("Anisoptera", "Coenagridae", "Zygoptera")] <- "Odonata"
+
+#Oligochaeta
+stomachs.raw$Diet.Item[stomachs.raw$Diet.Item %in% c("Annelida")] <- "Oligochaeta"
+
+#Vascular Plants
+stomachs.raw$Diet.Item[stomachs.raw$Diet.Item %in% c("Utricularia gibba")] <- "Vasc Plant"
+
+```
+
+# Reformat data
+```{r}
+#prey individual sum like prey items
+#some individuals now have duplicate entries per diet item after condensing
+stomachs.counts.condensed <- stomachs.raw %>% 
+  select(ID, Diet.Item, Count) %>% 
+  group_by(ID, Diet.Item) %>% summarise(Count = sum(Count))
+
+#pivot wider for count data
+stomachs.counts <- stomachs.counts.condensed %>% filter(Diet.Item != "-") %>% 
+  pivot_wider(id_cols = ID, names_from = Diet.Item, values_from = Count, values_fill = 0) %>% 
+  select(order(colnames(.))) %>% 
+  select(ID, everything())
+
+#do the same for volume data
+#sum like diet items per individual
+stomachs.volume.condensed <- stomachs.raw %>% 
+  mutate_at(vars(Volume), funs(as.numeric)) %>% 
+  select(ID, Diet.Item, Volume) %>% 
+  group_by(ID, Diet.Item) %>% summarise(Volume = sum(Volume))
+
+#pivot wider for volume data
+stomachs.volume <- stomachs.volume.condensed %>% filter(Diet.Item != "-") %>% 
+  pivot_wider(id_cols = ID, names_from = Diet.Item, values_from = Volume) %>% 
+  mutate_at(vars(-c("ID")), funs(as.numeric))
+```
+
+# Merge with covariates
+```{r}
+#read in processed samples data
+processed.samples <- read.csv(file = "Outputs/Processed Samples/processed_samples_qaqc.csv")
+
+
+
+#isolate sample that we dissected stomachs for
+processed.stomachs <- processed.samples %>% filter(ID %in% stomachs.counts$ID) %>% distinct(ID, .keep_all = T) 
+
+#we dissected two stomachs that don't appear in the processed samples datasheet
+missing.stomachs <- stomachs.counts %>% filter(!ID %in% processed.stomachs$ID)
+#they also do not appear in the physical datasheets
+#omitting them from analyses
+
+#merge stomach data with processed sample data to add covariates
+stomachs.merge <- merge(processed.stomachs, stomachs.counts, by = "ID")
+```
+
+Export to outputs
+```{r}
+stomachs.merge %>% select(ID, size_class, Species, Season, Year, Slough, Site, Habitat, Length,
+                         Wet_Weight, Sex, Amphipoda:`Vasc Plant`) %>% 
+                write.csv("Outputs/Stomach Contents/stomachs_count_merge.csv")
+```
+
+
