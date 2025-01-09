@@ -1,0 +1,424 @@
+---
+title: "04_trophic_positions_from_stomach_contents"
+author: "Peter Flood"
+date: "2024-03-04"
+output: 
+  html_document:
+    toc: true
+    df_print: paged
+    number_sections: true
+  html_notebook:
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load Libraries
+```{r}
+library(tidyverse)
+library(openxlsx)
+library(RVAideMemoire)
+library(lmPerm)
+library(rcompanion)
+```
+
+# Read in data
+```{r}
+#Using merged stomach counts 
+#which is output from previous scripts
+stomach.counts <- read.csv("Outputs/Stomach Contents/stomachs_count_merge.csv")
+```
+
+# Calculate individual trophic positions
+
+```{r}
+#Remove covariates aside from size class, habitat, season, and slough and remove empty stomachs
+no.empty.stomachs <- stomach.counts %>% 
+  filter(Empty == 0) %>% 
+  select(-c(ID, Species, Year, Site, Length, Wet_Weight, Sex, Empty))
+
+#number of empty stomachs
+nrow(stomach.counts)-nrow(no.empty.stomachs)
+#238
+
+#create vector of diet item trophic positions in the same order as the columns in no.empty.stomachs
+diet.item.trophp <- c(1.5, 2, 2, 2, 2.5, 1.5, 1.5, 1.5, 1, 1.5, 2.37, 0.2, 1.5, 1, 0, 2, 2, 1.5, 1.5, 2.5, 1.5, 1, 2, 1.5, 1.5, 2, #ends with Palaemonetes
+                      0, 2, 1.5, 0)
+names(diet.item.trophp) <- colnames(no.empty.stomachs)[5:34]
+#calculate trophic positions with equation from Adams et al 1983 like in Flood et al 2022
+#TrophP = 1 + sum(trophp[prey]*proportion of diet of prey item)
+
+#remove covariates
+all.com <- no.empty.stomachs %>% select(-c(size_class, Season, Slough, Habitat))
+
+#create prey proportion matrix
+#first, calculate row sum
+prey.sums <- apply(all.com, 1, sum)
+
+#create matrix to write over
+prey.pro<-all.com
+
+#Write loop to calculate prey proportions and write over the matrix we just made
+for(i in 1:nrow(all.com)){
+  for(j in 1:ncol(all.com)){
+    prey.pro[i,j]<-all.com[i,j]/prey.sums[i]
+  }
+}
+
+prey.pro[is.na(prey.pro)]<-0
+
+#check rows sum to one to be sure the loop worked correctly
+all.com.check<-apply(prey.pro, 1, sum)
+sort(all.com.check, decreasing = F)
+all.com.check[is.na(all.com.check)]
+sum(all.com.check)==nrow(all.com)
+
+#prey proportion * prey trophic position
+prey.pro.troph<-diet.item.trophp*prey.pro
+
+#take the sum, add 1
+all.com.trophp<-apply(prey.pro.troph, 1, sum)+1 %>% round(3)
+all.com.trophp.na<-all.com.trophp[is.na(all.com.trophp)]
+```
+
+# Compare across size classes, habitats, seasons, and sloughs
+```{r}
+#data formatting and prep for statistical analysis
+#isolate covariates
+covariates <- no.empty.stomachs %>% select(size_class, Season, Slough, Habitat)
+#re-attach covariates
+all.trophp <- bind_cols(covariates, all.com.trophp)
+colnames(all.trophp) <- c(colnames(covariates), "Trophic_Position")
+
+#sample size per level
+all.trophp.n<-all.trophp %>% group_by(size_class, Season, Slough, Habitat) %>% tally()
+
+#drop levels where n < 5
+all.trophp.5<-all.trophp %>% group_by(size_class, Season, Slough, Habitat) %>% filter(n()>4) %>% ungroup()
+#new sample size table
+all.trophp.5.n<-all.trophp.5 %>% group_by(size_class, Season, Slough, Habitat) %>% tally()
+```
+
+## Permuted ANOVA
+```{r}
+#Test assumption of normality - likely violated
+#library(RVAideMemoire)
+byf.shapiro(Trophic_Position ~ size_class, all.trophp.5) 
+byf.shapiro(Trophic_Position ~ Season, all.trophp.5) 
+byf.shapiro(Trophic_Position ~ Slough, all.trophp.5) 
+byf.shapiro(Trophic_Position ~ Habitat, all.trophp.5) 
+
+#Both Trophic Position and log(Trophic Position) have non-normal groups for all factors
+#proceed with permuted ANOVA
+#library(lmPerm)
+trophp.5.aovp<-aovp(Trophic_Position ~ size_class*Habitat*Season*Slough, data = all.trophp.5, perm = "Exact")
+aovp.summary<-summary(trophp.5.aovp)[[1]]
+write.xlsx(aovp.summary, file = "Outputs/Stomach Contents/Trophic Position/aovp_summary.xlsx")
+```
+
+## Post-hoc comparisons
+```{r}
+#pairwise permutation test
+#library(rcompanion)
+trophp.5.unite<-all.trophp.5 %>% unite(col = "ont_habdate", c("size_class", "Habitat", "Season", "Slough"), sep = "_")
+
+pairwise.trophp<-pairwisePermutationTest(formula = Trophic_Position ~ ont_habdate, data = trophp.5.unite) 
+
+pairwise.trophp<-pairwise.trophp %>% arrange(p.value)
+```
+
+### Reformat post-hoc test output
+```{r}
+#reformat to separate ont_habdate comparison column into its constituents 
+pairwise.trophp.sep<-pairwise.trophp %>% separate(Comparison, into = c("A", "B"), sep = " - ") %>% 
+  separate(A, into = c("Size Class A", "Habitat A", "Season A", "Slough A"), sep = "_") %>% 
+  separate(B, into = c("Size Class B", "Habitat B", "Season B", "Slough B"), sep = "_") %>% 
+  mutate(`Slough B` = gsub(" = 0", "", `Slough B`)) %>% 
+  arrange(`Size Class A`, `Habitat A`, `Season A`, `Slough A`, `Size Class B`, `Habitat B`, `Season B`, `Slough B`) 
+
+#separate out certain kinds of comparisons w/in each slough
+#and then filter for comparisons where p <=0.05
+#habitat comparisons
+habitat.shifts <- pairwise.trophp.sep %>% filter(`Size Class A` == `Size Class B` & `Slough A` == `Slough B` &
+                                                   `Season A` == `Season B`)
+habitat.shifts.05 <- habitat.shifts %>% filter(p.value <= 0.06)
+
+#season comparisons
+season.shifts <- pairwise.trophp.sep %>% filter(`Size Class A` == `Size Class B` & `Slough A` == `Slough B` &
+                                                   `Habitat A` == `Habitat B`)
+season.shifts.05 <- season.shifts %>% filter(p.value <= 0.06)
+
+#slough comparison
+slough.shifts <- pairwise.trophp.sep %>% filter(`Size Class A` == `Size Class B` & `Habitat A` == `Habitat B` &
+                                                   `Season A` == `Season B`)
+slough.shifts.05 <- slough.shifts %>% filter(p.value <= 0.06)
+
+#size_class shifts
+size.class.shifts <- pairwise.trophp.sep %>% separate(col = `Size Class A`, into = c("Species A", "Size Class A"),
+                                                      sep = "(?<=[A-Za-z])(?=[0-9])") %>% 
+  separate(col = `Size Class B`, into = c("Species B", "Size Class B"),
+           sep = "(?<=[A-Za-z])(?=[0-9])") %>% 
+  filter(`Species A` == `Species B` & `Habitat A` == `Habitat B` &
+           `Season A` == `Season B` & `Slough A` == `Slough B`) %>% 
+  unite(col = "Size Class A", c(`Species A`, `Size Class A`), sep = "") %>% 
+  unite(col = "Size Class B", c(`Species B`, `Size Class B`), sep = "")
+
+size.class.shifts.05 <- size.class.shifts %>% filter(p.value <=0.06)
+
+#all shifts in trophic position with p <= 0.055
+trophic_position_shifts <- pairwise.trophp.sep %>% filter(p.value <= 0.06)
+
+#make a list of the different comparisons and export to excel
+trophic.comarisons.05 <- list("Size Class Shifts" = size.class.shifts.05, "Slough Shifts" = slough.shifts.05,
+                              "Habitat Shifts" = habitat.shifts.05, "Season Shifts" = season.shifts.05,
+                              "All Shifts" = trophic_position_shifts)
+write.xlsx(trophic.comarisons.05, file = "Outputs/Stomach Contents/Trophic Position/significant_trophic_position_comparisons.xlsx")
+```
+
+# Mean & SD trophic position per habitat/season/slough
+```{r}
+#calculate mean and sd per size class per habitat per season per slough
+all.trophp.mean.sd <- all.trophp %>% group_by(size_class, Slough, Season, Habitat) %>% 
+  summarise(Mean_Trophic_Position = mean(Trophic_Position), SD_Trophic_Position = sd(Trophic_Position)) %>% 
+  bind_cols(all.trophp.n$n)
+
+colnames(all.trophp.mean.sd) <- c(colnames(all.trophp.mean.sd)[1:6], "N")
+
+write.xlsx(all.trophp.mean.sd, "Outputs/Stomach Contents/Trophic Position/all_post-invasion_trophic_positions.xlsx")
+```
+# Pre- vs Post-Invasion Comparisons
+
+The pre-invasion tropic positions are from Flood et al. 2023 - https://doi.org/10.1016/j.fooweb.2022.e00265
+Raw data and associated code that creates the below data frame are available through the Florida Coastal Everglades Long-term Ecological Research site website (https://fcelter.fiu.edu/data/) and are data package FCE1263_Flood_StableIsotopesStomachContents
+
+For convenience, the below data frame is also archived with the data package associated with this script: FCE1259_Flood_StableIsotopesStomachContents
+
+## Pre-invasion load and format data
+```{r}
+#load data
+pre.trophp <- read.csv("Data/Stomach Contents/pre-invasion_individual_trophic_positions.csv")
+
+#format
+pre.trophp.formatted <- pre.trophp %>% filter(Ont_Class != 0, !HabDate %in% c("Cladium1", "Cladium2")) %>% 
+  separate(col = HabDate, into = c("Habitat", "Season"), sep = "(?<=[A-Za-z])(?=[0-9])") %>% 
+  mutate(Habitat = gsub("Eleocharis", "Marsh", Habitat)) %>% 
+  mutate(Season = case_when(Season == 1 ~ "Wet", Season == 2 ~ "Dry")) %>% 
+  separate(col = Ont_Class, into = c("Species", "Size_Class"), sep = "(?<=[A-Za-z])(?=[0-9])")
+
+#need to make sure species that weren't assigned a size class in the historic data have one now
+#all those missing only have 1 size class option
+pre.no.size.class <- pre.trophp.formatted %>% filter(is.na(Size_Class))
+
+#list of size classes for pre and post invasion data
+levels(as.factor(all.trophp$size_class)) #post-invasion
+levels(as.factor(pre.no.size.class$Species)) #pre-invasion spp w/o a size class designation
+
+#assign size classes to those that do not have one
+pre.trophp.formatted$Size_Class[pre.trophp.formatted$Species=="A_cal"] <- 2
+pre.trophp.formatted$Size_Class[pre.trophp.formatted$Species=="A_xen"] <- 1 #none collected during post-invasion work
+pre.trophp.formatted$Size_Class[pre.trophp.formatted$Species=="C_bat"] <- 1
+pre.trophp.formatted$Size_Class[pre.trophp.formatted$Species=="C_bim"] <- 1
+pre.trophp.formatted$Size_Class[pre.trophp.formatted$Species=="C_var"] <- 1
+pre.trophp.formatted$Size_Class[pre.trophp.formatted$Species=="E_eve"] <- 1
+pre.trophp.formatted$Size_Class[pre.trophp.formatted$Species=="E_fus"] <- 1 #none collected during post-invasion work
+pre.trophp.formatted$Size_Class[pre.trophp.formatted$Species=="E_glo"] <- 1
+pre.trophp.formatted$Size_Class[pre.trophp.formatted$Species=="L_mac"] <- 1
+pre.trophp.formatted$Size_Class[pre.trophp.formatted$Species=="L_mar"] <- 1
+pre.trophp.formatted$Size_Class[pre.trophp.formatted$Species=="L_sic"] <- 1
+pre.trophp.formatted$Size_Class[pre.trophp.formatted$Species=="M_sal"] <- 1
+pre.trophp.formatted$Size_Class[pre.trophp.formatted$Species=="N_cry"] <- 1 #none collected during post-invasion work
+pre.trophp.formatted$Size_Class[pre.trophp.formatted$Species=="N_gyr"] <- 1 
+pre.trophp.formatted$Size_Class[pre.trophp.formatted$Species=="N_mac"] <- 1 #none collected during post-invasion work
+pre.trophp.formatted$Size_Class[pre.trophp.formatted$Species=="N_pet"] <- 1
+pre.trophp.formatted$Size_Class[pre.trophp.formatted$Species=="T_mar"] <- 1
+
+#re-run this code
+pre.no.size.class <- pre.trophp.formatted %>% filter(is.na(Size_Class)) #0 rows means we got them all
+
+#unite species and size class columns and add column to denote pre-invasion
+pre.trophp.unite <- pre.trophp.formatted %>% unite("size_class", c(Species, Size_Class), sep = "") %>% 
+  mutate(Invasion_Status = "Pre-Invasion") %>% 
+  mutate(Trophic_Position = TrophP) %>% 
+  select(-c(TrophP)) %>% 
+  select(size_class, Season, Habitat, Trophic_Position, Invasion_Status) %>% 
+  mutate(size_class = gsub("_", ".", size_class))
+
+#reformat all.trophp to match pre.trophp.unite
+#Also need to drop Taylor Slough data
+post.trophp <- all.trophp %>% filter(Slough == "SRS") %>% select(-c(Slough)) %>% 
+  mutate(Invasion_Status = "Post-Invasion")
+
+#combine and condense covariates 
+pre.post.trophp <- bind_rows(pre.trophp.unite, post.trophp)
+#drop any groups where n < 5
+pre.post.trophp.5 <- pre.post.trophp %>% group_by(size_class, Season, Habitat, Invasion_Status) %>% filter(n()>4) %>% ungroup()
+```
+
+## Permuted ANOVA
+
+Check assumptions of normality
+```{r}
+#Test assumption of normality for ANOVA
+#library(RVAideMemoire)
+byf.shapiro(Trophic_Position ~ size_class, pre.post.trophp.5) 
+byf.shapiro(Trophic_Position ~ Season, pre.post.trophp.5)
+byf.shapiro(Trophic_Position ~ Habitat, pre.post.trophp.5) 
+byf.shapiro(Trophic_Position ~ Invasion_Status, pre.post.trophp.5) 
+#Both Trophic Position and log(Trophic Position) have non-normal groups for all factors
+#proceed with permuted ANOVA
+```
+
+Permuted ANOVA 
+```{r}
+#library(lmPerm)
+pre.post.trophp.5.aovp <- aovp(Trophic_Position ~ size_class*Habitat*Season*Invasion_Status, data = pre.post.trophp.5, perm = "Exact")
+pre.post.aovp.summary <- summary(pre.post.trophp.5.aovp)[[1]]
+write.xlsx(pre.post.aovp.summary, file = "Outputs/Stomach Contents/pre_post_aovp_summary.xlsx")
+```
+
+### Post-hoc pairwise permutation test
+Functionally similar to Tukey's HSD
+```{r}
+#pairwise permutation test
+#library(rcompanion)
+pre.post.trophp.5.unite <- pre.post.trophp.5 %>% 
+  unite(col = "ont_habdate_invasion", c("size_class", "Habitat", "Season", "Invasion_Status"), sep = "_")
+
+pre.post.pairwise.trophp <- pairwisePermutationTest(formula = Trophic_Position ~ ont_habdate_invasion, data = pre.post.trophp.5.unite) 
+
+pre.post.pairwise.trophp <- pre.post.pairwise.trophp %>% arrange(p.value)
+```
+
+Reformat post-hoc output
+```{r}
+#reformat to separate ont_habdate comparison column into its constituents 
+pre.post.pairwise.trophp.sep <- pre.post.pairwise.trophp %>% separate(Comparison, into = c("A", "B"), sep = " - ") %>% 
+  separate(A, into = c("Size Class A", "Habitat A", "Season A", "Invasion Status A"), sep = "_") %>% 
+  separate(B, into = c("Size Class B", "Habitat B", "Season B", "Invasion Status B"), sep = "_") %>% 
+  mutate(`Invasion Status B` = gsub(" = 0", "", `Invasion Status B`)) %>% 
+  arrange(`Size Class A`, `Habitat A`, `Season A`, `Invasion Status A`, `Size Class B`, `Habitat B`, `Season B`, `Invasion Status B`) 
+
+#separate out certain kinds of comparisons w/in each slough
+#and then filter for comparisons where p <=0.05
+#pre/post shift in trophic position
+pre.post.shifts <- pre.post.pairwise.trophp.sep %>% filter(`Size Class A` == `Size Class B` & `Habitat A` == `Habitat B` &
+                                                   `Season A` == `Season B`) %>% arrange(p.value)
+
+pre.post.shifts.05 <- pre.post.shifts %>% filter(p.value <= 0.06)
+
+#post-invasion shifts among habitats and seasons
+#habitat comparisons
+post.habitat.shifts <- pre.post.pairwise.trophp.sep %>% filter(`Invasion Status A` == `Invasion Status B` &
+                                                               `Size Class A` == `Size Class B` & 
+                                                                 `Season A` == `Season B`) %>% arrange(p.value) %>% 
+                                                        filter(`Invasion Status A` == "Post-Invasion")
+
+post.habitat.shifts.05 <- post.habitat.shifts %>% filter(p.value <= 0.06)
+
+#season comparisons
+post.season.shifts <- pre.post.pairwise.trophp.sep %>% filter(`Invasion Status A` == `Invasion Status B` &
+                                                                 `Size Class A` == `Size Class B` & 
+                                                                 `Habitat A` == `Habitat B`) %>% arrange(p.value) %>% 
+  filter(`Invasion Status A` == "Post-Invasion")
+
+post.season.shifts.05 <- post.season.shifts %>% filter(p.value <= 0.06)
+
+
+#size_class shifts
+post.size.class.shifts <- pre.post.pairwise.trophp.sep %>% separate(col = `Size Class A`, into = c("Species A", "Size Class A"),
+                                                      sep = "(?<=[A-Za-z])(?=[0-9])") %>% 
+  separate(col = `Size Class B`, into = c("Species B", "Size Class B"),
+           sep = "(?<=[A-Za-z])(?=[0-9])") %>% 
+  filter(`Species A` == `Species B` & `Habitat A` == `Habitat B` &
+           `Season A` == `Season B` & `Invasion Status A` == "Post-Invasion" & 
+           `Invasion Status B` == "Post-Invasion") %>% 
+  unite(col = "Size Class A", c(`Species A`, `Size Class A`), sep = "") %>% 
+  unite(col = "Size Class B", c(`Species B`, `Size Class B`), sep = "")
+
+post.size.class.shifts.05 <- post.size.class.shifts %>% filter(p.value <=0.06)
+
+#all shifts in trophic position with p <= 0.055
+pre.post.trophic.position.shifts <- pre.post.pairwise.trophp.sep %>% filter(p.value <= 0.06)
+
+#make a list of the different comparisons and export to excel
+pre.post.trophic.comarisons.05 <- list("Pre_Post Shifts" = pre.post.shifts, "Size Class Shifts" = post.size.class.shifts.05,
+                              "Habitat Shifts" = post.habitat.shifts.05, "Season Shifts" = post.season.shifts.05,
+                              "All Shifts" = pre.post.trophic.position.shifts)
+write.xlsx(pre.post.trophic.comarisons.05, file = "Outputs/Stomach Contents/pre_post_trophic_position_comparisons.xlsx")
+```
+
+## Post-invasion mean & SD trophic position
+```{r}
+#calculate mean and sd per size class per habitat per season per slough
+#sample size
+pre.post.trophp.n <-  pre.post.trophp %>% group_by(size_class, Invasion_Status, Season, Habitat) %>% tally()
+#mean & sd
+pre.post.trophp.mean.sd <- pre.post.trophp %>% group_by(size_class, Invasion_Status, Season, Habitat) %>% 
+  summarise(Mean_Trophic_Position = mean(Trophic_Position), SD_Trophic_Position = sd(Trophic_Position)) %>% 
+  bind_cols(pre.post.trophp.n$n)
+#change colnames
+colnames(pre.post.trophp.mean.sd) <- c(colnames(pre.post.trophp.mean.sd)[1:6], "N")
+```
+
+#Identify pre- vs post-invasion trophic positions shifts
+```{r}
+#condense pre.post.shifts columns to prepare to merge with pre.post.trophp.mean.sd
+pre.post.shifts.unite <- pre.post.shifts %>% unite("ont_habdate", c(`Size Class A`, `Habitat A`, `Season A`))
+
+#wide form w/ psuedo F and p-value
+pre.post.trophp.wide <- pre.post.trophp.mean.sd %>%
+  #mutate(across(Stat:p.value, round, 2))
+  unite("Trophic_Position",
+      c(Mean_Trophic_Position, SD_Trophic_Position),
+      sep = " \u00B1 ") %>%
+  pivot_wider(names_from = Invasion_Status,
+              values_from = c(Trophic_Position, N)) %>%
+  unite("ont_habdate", c(size_class, Habitat, Season)) %>%
+  merge(., pre.post.shifts.unite, by = "ont_habdate", all.x = T) %>%
+  select(
+    ont_habdate,
+    `N_Post-Invasion`,
+    `Trophic_Position_Post-Invasion`,
+    `N_Pre-Invasion`,
+    `Trophic_Position_Pre-Invasion`,
+    Stat,
+    p.value
+  ) %>%
+  mutate(Stat = as.numeric(Stat),
+         p.value = as.numeric(p.value)) %>% 
+  #mutate(across(Stat:p.value), round, 2) %>%
+  separate(ont_habdate,
+           into = c("Size Class", "Habitat", "Season"),
+           sep = "_") 
+
+pre.post.wide.stat <- pre.post.trophp.wide %>% filter(!is.na(p.value))
+
+pre.post.wide.stat.05 <- pre.post.wide.stat %>% filter(p.value < 0.06)    
+
+#export to excel
+write.xlsx(list("All_Pre_Post" = pre.post.trophp.wide, "Pre_Post_with_Stats" = pre.post.wide.stat, "Pre_Post_Significant" = pre.post.wide.stat.05), 
+           file = "Outputs/Stomach Contents/pre_post_mean_sd_trophp_stats.xlsx")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
