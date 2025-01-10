@@ -117,7 +117,7 @@ byf.shapiro(Trophic_Position ~ Habitat, all.trophp.5)
 #library(lmPerm)
 trophp.5.aovp<-aovp(Trophic_Position ~ size_class*Habitat*Season*Slough, data = all.trophp.5, perm = "Exact")
 aovp.summary<-summary(trophp.5.aovp)[[1]]
-write.xlsx(aovp.summary, file = "Outputs/Stomach Contents/Trophic Position/aovp_summary.xlsx")
+write.xlsx(aovp.summary, file = "Outputs/Stomach Contents/Trophic Position/Post-Invasion/aovp_summary.xlsx")
 ```
 
 ## Post-hoc comparisons
@@ -176,7 +176,8 @@ trophic_position_shifts <- pairwise.trophp.sep %>% filter(p.value <= 0.06)
 trophic.comarisons.05 <- list("Size Class Shifts" = size.class.shifts.05, "Slough Shifts" = slough.shifts.05,
                               "Habitat Shifts" = habitat.shifts.05, "Season Shifts" = season.shifts.05,
                               "All Shifts" = trophic_position_shifts)
-write.xlsx(trophic.comarisons.05, file = "Outputs/Stomach Contents/Trophic Position/significant_trophic_position_comparisons.xlsx")
+write.xlsx(trophic.comarisons.05, 
+           file = "Outputs/Stomach Contents/Trophic Position/Post-Invasion/significant_trophic_position_comparisons.xlsx")
 ```
 
 # Mean & SD trophic position per habitat/season/slough
@@ -188,7 +189,7 @@ all.trophp.mean.sd <- all.trophp %>% group_by(size_class, Slough, Season, Habita
 
 colnames(all.trophp.mean.sd) <- c(colnames(all.trophp.mean.sd)[1:6], "N")
 
-write.xlsx(all.trophp.mean.sd, "Outputs/Stomach Contents/Trophic Position/all_post-invasion_trophic_positions.xlsx")
+write.xlsx(all.trophp.mean.sd, "Outputs/Stomach Contents/Trophic Position/Post-Invasion/all_post-invasion_trophic_positions.xlsx")
 ```
 # Pre- vs Post-Invasion Comparisons
 
@@ -277,7 +278,8 @@ Permuted ANOVA
 #library(lmPerm)
 pre.post.trophp.5.aovp <- aovp(Trophic_Position ~ size_class*Habitat*Season*Invasion_Status, data = pre.post.trophp.5, perm = "Exact")
 pre.post.aovp.summary <- summary(pre.post.trophp.5.aovp)[[1]]
-write.xlsx(pre.post.aovp.summary, file = "Outputs/Stomach Contents/pre_post_aovp_summary.xlsx")
+write.xlsx(pre.post.aovp.summary, 
+           file = "Outputs/Stomach Contents/Trophic Position/Pre-vs-Post-Invasion/pre_post_aovp_summary.xlsx")
 ```
 
 ### Post-hoc pairwise permutation test
@@ -348,7 +350,8 @@ pre.post.trophic.position.shifts <- pre.post.pairwise.trophp.sep %>% filter(p.va
 pre.post.trophic.comarisons.05 <- list("Pre_Post Shifts" = pre.post.shifts, "Size Class Shifts" = post.size.class.shifts.05,
                               "Habitat Shifts" = post.habitat.shifts.05, "Season Shifts" = post.season.shifts.05,
                               "All Shifts" = pre.post.trophic.position.shifts)
-write.xlsx(pre.post.trophic.comarisons.05, file = "Outputs/Stomach Contents/pre_post_trophic_position_comparisons.xlsx")
+write.xlsx(pre.post.trophic.comarisons.05, 
+           file = "Outputs/Stomach Contents/Trophic Position/Pre-vs-Post-Invasion/pre_post_trophic_position_comparisons.xlsx")
 ```
 
 ## Post-invasion mean & SD trophic position
@@ -401,7 +404,7 @@ pre.post.wide.stat.05 <- pre.post.wide.stat %>% filter(p.value < 0.06)
 
 #export to excel
 write.xlsx(list("All_Pre_Post" = pre.post.trophp.wide, "Pre_Post_with_Stats" = pre.post.wide.stat, "Pre_Post_Significant" = pre.post.wide.stat.05), 
-           file = "Outputs/Stomach Contents/pre_post_mean_sd_trophp_stats.xlsx")
+           file = "Outputs/Stomach Contents/Trophic Position/Pre-vs-Post-Invasion/pre_post_mean_sd_trophp_stats.xlsx")
 ```
 
 

@@ -184,32 +184,32 @@ Dexter, E., G. Rollwagen-Bollens, and S. M. Bollens. 2018. The trouble with stre
 
 Ggplot version
 ```{r}
-simVector<-as.vector(stressTest$oecosimu$simulated)
-simVector<-as.data.frame(simVector)
-simVector<-cbind(simVector,seq(1:1000))
-
-(stress.sim.plot <- ggplot(simVector,aes(x=simVector))+
-  geom_histogram(col="black",size=.25)+
-  geom_segment(aes(x = stressTest$oecosimu$statistic, y = 0, xend = stressTest$oecosimu$statistic), 
-                yend = 450,linetype=2,color = "red",size=.5)+
-  annotate(geom = "text", label = "p < 0.001", x = 0.2325, y = 150)+
-  annotate(geom = "text", label = "Stress = 0.227", x = 0.234, y = 160)+
-  labs(x="Stress value", y="Frequency observed")+
-    theme_bw() + theme(panel.grid.major = element_blank(), panel.grid.minor= element_blank(), 
-                       axis.line = element_line(colour = "black",size=.25))+
-    theme(axis.ticks = element_line(colour = "black", size = .25), axis.text=element_text(colour="black"),
-          text=element_text(size=12))
-
-)
-
-ggsave(
-  filename = "Outputs/Stomach Contents/Diet/Post-Invasion/stress_sim_plot.tiff",
-  plot = stress.sim.plot,
-  dpi  = 600,
-  units = "mm",
-  height = 150,
-  width = 200
-)
+# simVector<-as.vector(stressTest$oecosimu$simulated)
+# simVector<-as.data.frame(simVector)
+# simVector<-cbind(simVector,seq(1:1000))
+# 
+# (stress.sim.plot <- ggplot(simVector,aes(x=simVector))+
+#   geom_histogram(col="black",size=.25)+
+#   geom_segment(aes(x = stressTest$oecosimu$statistic, y = 0, xend = stressTest$oecosimu$statistic), 
+#                 yend = 450,linetype=2,color = "red",size=.5)+
+#   annotate(geom = "text", label = "p < 0.001", x = 0.2325, y = 150)+
+#   annotate(geom = "text", label = "Stress = 0.227", x = 0.234, y = 160)+
+#   labs(x="Stress value", y="Frequency observed")+
+#     theme_bw() + theme(panel.grid.major = element_blank(), panel.grid.minor= element_blank(), 
+#                        axis.line = element_line(colour = "black",size=.25))+
+#     theme(axis.ticks = element_line(colour = "black", size = .25), axis.text=element_text(colour="black"),
+#           text=element_text(size=12))
+# 
+# )
+# 
+# ggsave(
+#   filename = "Outputs/Stomach Contents/Diet/Post-Invasion/stress_sim_plot.tiff",
+#   plot = stress.sim.plot,
+#   dpi  = 600,
+#   units = "mm",
+#   height = 150,
+#   width = 200
+# )
 
 ```
 
@@ -220,7 +220,8 @@ post.nmds.consumers <- as.data.frame(post.nmds$points) %>%
   merge(., post.covariates.no.zero, by = "ID")
 #write this out to Excel for future use in SIBER
 write.csv(post.nmds.consumers, 
-          "Outputs/Stomach Contents/Diet/Post-Invasion/post_nmds_consumers.csv")
+          "Outputs/Stomach Contents/Diet/Post-Invasion/post_nmds_consumers.csv",
+          row.names = F)
 
 #centroids per size class
 post.nmds.spp.centroid <- post.nmds.consumers %>% group_by(size_class) %>% 
@@ -957,7 +958,7 @@ prey.pro.functional <- post.prey.pro %>%
   rename("Size Class" = size_class)
 
 #export
-write.csv(prey.pro.functional, "post_prey_pro_functional.csv")
+write.csv(prey.pro.functional, "Outputs/Stomach Contents/Diet/Post-Invasion/post_prey_pro_functional.csv")
 ```
 
 
@@ -1226,7 +1227,7 @@ pre.post.nmds.consumers <-
   )) %>%
   arrange(desc(ID))
 #write this out for future use in SIBER (stomach content niche models)
-write.csv(pre.post.nmds.consumers, "pre_post_nmds_consumers.csv")
+write.csv(pre.post.nmds.consumers, "Outputs/Stomach Contents/Diet/Pre-vs-Post-Invasion/pre_post_nmds_consumers.csv")
 
 #centroids per size class
 pre.post.nmds.spp.centroid <-
@@ -1617,7 +1618,7 @@ write.xlsx(
     "Pond_Dry" = pairwise.Pond.Dry.p,
     "All" = pre.post.pairwise.p.r2
   ),
-  "pre_post_pairwise_permanova.xlsx",
+  "Outputs/Stomach Contents/Diet/Pre-vs-Post-Invasion/pre_post_pairwise_permanova.xlsx",
   rowNames = T
 )
 ```
@@ -1709,7 +1710,7 @@ pre.post.simper <- simper(pre.post.prey.no.zero, pre.post.habitat.season.invasio
 #results summary
 pre.post.sim.sum <- summary(pre.post.simper) %>% lapply(., as.data.frame)
 #export to Excel
-write.xlsx(pre.post.sim.sum, file = "~/Outputs/Stomach Contents/Diet/Pre-vs-Post-Invasion/pre_post_simper.xlsx", row.names = T)
+write.xlsx(pre.post.sim.sum, file = "Outputs/Stomach Contents/Diet/Pre-vs-Post-Invasion/pre_post_simper.xlsx", row.names = T)
 ```
 
 Format output

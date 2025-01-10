@@ -1,0 +1,57 @@
+"Season","Habitat","Species","Size Class","Pre < Post","Pre-Invasion","Post-Invasion","Direction","Percent Change"
+"Dry","Marsh","E. evergladei","1","1.000",0.06,0.18,"Increase",225.38
+"Dry","Marsh","E. gloriosus","1","0.998",0.04,0.13,"Increase",217.27
+"Dry","Marsh","F. chrysotus","1","0.143",0.4,0.23,"No Change",-41.86
+"Dry","Marsh","G. holbrooki","1","1.000",0.09,0.45,"Increase",392.46
+"Dry","Marsh","G. holbrooki","2","0.286",0.22,0.14,"No Change",-38.42
+"Dry","Marsh","H. formosa","2","0.772",0.07,0.08,"No Change",24.02
+"Dry","Marsh","L. goodei","1","0.377",0.03,0.03,"No Change",-15.46
+"Dry","Marsh","L. goodei","2","1.000",0.05,0.11,"Increase",141.14
+"Dry","Marsh","L. marginatus","1","1.000",0.03,0.27,"Increase",833.94
+"Dry","Marsh","L. punctatus","2","0.107",0.59,0.3,"No Change",-49.69
+"Dry","Pond","A. natalis","1","0.001",0.18,0.01,"Decrease",-94.24
+"Dry","Pond","A. natalis","2","0.784",0.16,0.19,"No Change",18.91
+"Dry","Pond","A. natalis","3","0.092",0.19,0.08,"No Change",-57.58
+"Dry","Pond","A. natalis","4","0.033",0.24,0.09,"Decrease",-62.11
+"Dry","Pond","F. chrysotus","1","0.143",1.68,0.58,"No Change",-65.52
+"Dry","Pond","G. holbrooki","1","1.000",0.1,0.91,"Increase",809.27
+"Dry","Pond","G. holbrooki","2","0.286",0.25,1.36,"No Change",437.25
+"Dry","Pond","H. formosa","1","1.000",0.01,0.16,"Increase",1878.25
+"Dry","Pond","H. formosa","2","0.772",0.13,0.02,"No Change",-81.37
+"Dry","Pond","L. gulosus","2","0.309",0.27,0.21,"No Change",-22.31
+"Dry","Pond","L. gulosus","3","0.821",0.32,0.46,"No Change",45.87
+"Dry","Pond","L. gulosus","4","0.008",0.42,0.06,"Decrease",-84.55
+"Dry","Pond","L. marginatus","1","1.000",0.13,0.58,"Increase",360.68
+"Dry","Pond","L. platyrhincus","1","1.000",0.11,0.33,"Increase",208.78
+"Dry","Pond","L. punctatus","2","0.107",1.02,0.69,"No Change",-32.7
+"Dry","Pond","P. latipinna","2","0.994",0.02,0.13,"Increase",436.71
+"Wet","Marsh","F. chrysotus","1","0.143",0.44,1.05,"No Change",135.99
+"Wet","Marsh","G. holbrooki","1","1.000",0.13,0.37,"Increase",181.84
+"Wet","Marsh","G. holbrooki","2","0.286",0.41,1.09,"No Change",166.43
+"Wet","Marsh","H. formosa","1","1.000",0.03,0.33,"Increase",1017.38
+"Wet","Marsh","H. formosa","2","0.772",0.04,0.15,"No Change",306.19
+"Wet","Marsh","J. floridae","1","0.056",0.08,0.02,"No Change",-78.73
+"Wet","Marsh","L. goodei","1","0.377",0.04,0.14,"No Change",299.31
+"Wet","Marsh","L. goodei","2","1.000",0.02,0.35,"Increase",2205.72
+"Wet","Marsh","L. microlophus","1","0.000",0.24,0.01,"Decrease",-97.74
+"Wet","Marsh","L. punctatus","2","0.107",0.38,0.25,"No Change",-33.9
+"Wet","Pond","E. evergladei","1","1.000",0.04,0.26,"Increase",629.67
+"Wet","Pond","F. chrysotus","1","0.143",0.79,0.56,"No Change",-28.49
+"Wet","Pond","G. holbrooki","1","1.000",0.27,0.59,"Increase",122.09
+"Wet","Pond","G. holbrooki","2","0.286",1.56,0.92,"No Change",-41.16
+"Wet","Pond","H. formosa","1","1.000",0.01,0.11,"Increase",1963.78
+"Wet","Pond","H. formosa","2","0.772",0.01,0.11,"No Change",1089.82
+"Wet","Pond","L. goodei","1","0.377",0.01,0.1,"No Change",866.79
+"Wet","Pond","L. goodei","2","1.000",0.02,0.31,"Increase",1193.2
+"Wet","Pond","L. gulosus","2","0.309",0.28,0.5,"No Change",75.27
+"Wet","Pond","L. gulosus","3","0.821",0.25,0.64,"No Change",158.88
+"Wet","Pond","L. gulosus","4","0.008",0.38,0.33,"Decrease",-13.19
+"Wet","Pond","L. macrochirus","1","0.164",1.22,0.63,"No Change",-48.68
+"Wet","Pond","L. marginatus","1","1.000",0.23,1.96,"Increase",758
+"Wet","Pond","L. microlophus","2","0.085",0.06,0.02,"No Change",-64.31
+"Wet","Pond","L. platyrhincus","1","1.000",0.6,0.36,"Increase",-38.98
+"Wet","Pond","L. platyrhincus","2","0.000",0.85,0.03,"Decrease",-96.99
+"Wet","Pond","L. punctatus","2","0.107",0.74,0.4,"No Change",-46.17
+"Wet","Pond","M. salmoides","1","0.584",0.2,0.2,"No Change",0.03
+"Wet","Pond","M. urophthalmus","1","0.000",0.18,0.01,"Decrease",-94.91
+"Wet","Pond","P. mariae","1","0.819",0.15,0.19,"No Change",30.21
