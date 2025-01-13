@@ -1,0 +1,59 @@
+"Species","Season","Habitat","SRS","TSL","SRS < TSL","Percent Change"
+"Amphipoda","Wet","Marsh",0.92,0.78,0.21,-15.35
+"Belostoma spp","Wet","Marsh",0.24,0.51,0.76,107.79
+"Celithemus spp.","Wet","Marsh",0.04,0.88,1,1900
+"Chironomidae","Wet","Marsh",0.56,0.5,0.47,-10.22
+"C. urophthalmus","Wet","Marsh",0.48,0.61,0.67,25.47
+"Coenagrionidae","Wet","Marsh",0.38,0.32,0.46,-16.67
+"Copepoda","Wet","Marsh",0.14,0.31,0.69,124.46
+"E. gloriosus","Wet","Marsh",0.16,0.55,0.9,253.21
+"F. chrysotus","Wet","Marsh",0.84,0.76,0.36,-9.51
+"G. holbrooki","Wet","Marsh",0.37,0.6,0.84,62.8
+"H. formosa","Wet","Marsh",0.14,0.41,0.9,184.72
+"L. marginatus","Wet","Marsh",0.65,0.54,0.39,-17.74
+"L. goodei","Wet","Marsh",0.23,0.56,0.93,145.37
+"P. paludosus","Wet","Marsh",0.12,0.49,0.96,294.4
+"P. femoratus","Wet","Marsh",0.62,0.25,0.19,-60.42
+"Coenagrionidae","Wet","NP",0.09,0.38,0.88,345.35
+"E. evergladei","Wet","NP",0.06,0.59,0.99,888.33
+"F. chrysotus","Wet","NP",0.7,0.79,0.67,13.24
+"G. holbrooki","Wet","NP",0.44,0.79,1,80.23
+"H. formosa","Wet","NP",0.08,0.33,0.97,325.97
+"L. goodei","Wet","NP",0.34,0.38,0.62,12.72
+"Ostracoda","Wet","NP",0.58,0.88,0.81,50.86
+"P. paludosus","Wet","NP",0.21,0.55,0.98,159.91
+"P. femoratus","Wet","NP",0.13,0.32,0.79,142.86
+"Amphipoda","Wet","Pond",0.82,0.4,0.11,-50.92
+"B. gravida","Wet","Pond",0.06,0.31,0.88,380
+"C. urophthalmus","Wet","Pond",0.48,0.65,0.77,36.19
+"Copepoda","Wet","Pond",0.51,0.14,0.08,-72.83
+"G. holbrooki","Wet","Pond",0.52,0.7,0.85,34.29
+"H. formosa","Wet","Pond",0.38,0.79,0.91,107.09
+"L. macrochirus","Wet","Pond",0.33,0.32,0.52,-1.52
+"L. microlophus","Wet","Pond",0.22,0.4,0.76,81.74
+"L. goodei","Wet","Pond",0.3,0.32,0.59,8.39
+"M. siamensis","Wet","Pond",0.74,0.71,0.44,-2.99
+"M. salmoides","Wet","Pond",0.28,0.64,0.97,131.41
+"M. albus","Wet","Pond",0.46,0.78,0.86,69.87
+"N. petersoni","Wet","Pond",0.12,0.47,0.96,282.79
+"P. paludosus","Wet","Pond",0.21,0.73,0.92,252.17
+"P. latipinna","Wet","Pond",0.03,0.2,0.85,488.24
+"T. mariae","Wet","Pond",0.13,0.2,0.66,50.38
+"Amphipoda","Dry","Marsh",0.76,0.81,0.56,6.04
+"Celithemus spp.","Dry","Marsh",0.81,0.25,0.03,-69.74
+"E. gloriosus","Dry","Marsh",0.1,0.46,0.89,364
+"E. simplicicollis","Dry","Marsh",0.84,0.41,0.15,-51.13
+"F. chrysotus","Dry","Marsh",0.81,0.63,0.25,-23.07
+"G. holbrooki","Dry","Marsh",0.21,0.63,0.95,195.31
+"H. formosa","Dry","Marsh",0.16,0.45,0.87,181.13
+"L. goodei","Dry","Marsh",0.37,0.43,0.64,16.09
+"P. paludosus","Dry","Marsh",0.36,0.55,0.81,51.66
+"P. femoratus","Dry","Marsh",0.64,0.04,0.03,-93.55
+"Amphipoda","Dry","Pond",0.95,0.42,0.03,-56.45
+"Hydrachnidia","Dry","Pond",0.13,0.29,0.81,122.31
+"Copepoda","Dry","Pond",0.1,0.06,0.43,-37.62
+"G. holbrooki","Dry","Pond",0.64,0.44,0.18,-30.24
+"H. formosa","Dry","Pond",0.12,0.35,0.96,202.61
+"L. goodei","Dry","Pond",0.28,0.26,0.48,-5.69
+"Ostracoda","Dry","Pond",0.92,0.52,0.05,-43.71
+"P. paludosus","Dry","Pond",0.18,0.35,0.89,90.66
