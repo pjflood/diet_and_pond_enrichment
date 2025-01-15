@@ -1,0 +1,59 @@
+"Season","Habitat","Size Class","TSL","SRS","TSL < SRS","Percent Change"
+"Dry","Marsh","Celithimus spp.",0.7,0.8,0.43,-13.38
+"Dry","Marsh","E.glo1",1.79,2.73,0.17,-34.66
+"Dry","Marsh","E. simplicicollis",4.52,0.57,1,695.42
+"Dry","Marsh","F.chr1",2.25,4.36,0.17,-48.3
+"Dry","Marsh","G.hol2",0.11,2.03,0,-94.41
+"Dry","Marsh","H.for2",3.06,2.3,0.74,33.15
+"Dry","Marsh","L.goo1",1.29,2.57,0.01,-49.77
+"Dry","Marsh","L.goo2",1.97,2.67,0.13,-26.3
+"Dry","Marsh","P. paludosus",3.64,0.41,1,783.2
+"Dry","Marsh","P. femoratus",4.63,1.16,1,299.43
+"Dry","Pond","Copepoda",3.48,9.26,0.02,-62.41
+"Dry","Pond","G.hol1",3.66,4.68,0.16,-21.72
+"Dry","Pond","G.hol2",2.54,3.95,0.05,-35.71
+"Dry","Pond","H.for2",0.17,0.34,0.2,-50.61
+"Dry","Pond","L.goo1",2.05,1.88,0.75,9.22
+"Dry","Pond","L.goo2",4.79,3.64,0.84,31.83
+"Dry","Pond","P. paludosus",0.6,0.68,0.41,-11.88
+"Wet","Marsh","Belostoma spp.",0.44,2.03,0.01,-78.17
+"Wet","Marsh","C.uro1",3.17,3.77,0.32,-15.95
+"Wet","Marsh","Celithimus spp.",0.06,0.08,0.32,-20.01
+"Wet","Marsh","Chironomidae",4.83,5.24,0.43,-7.91
+"Wet","Marsh","Coenagrionidae",0.35,0.67,0.22,-48.46
+"Wet","Marsh","Copepoda",13.47,2.39,0.99,462.91
+"Wet","Marsh","E.glo1",2.82,1.47,0.83,91.81
+"Wet","Marsh","F.chr1",1.48,1.73,0.37,-14.29
+"Wet","Marsh","G.hol1",3.4,1.3,1,162.07
+"Wet","Marsh","G.hol2",2.69,0.87,1,209.33
+"Wet","Marsh","H.for1",3.32,0.7,1,376.83
+"Wet","Marsh","H.for2",1.77,1.99,0.39,-10.87
+"Wet","Marsh","L.goo1",5.72,3.83,0.9,49.47
+"Wet","Marsh","L.goo2",3.41,5.23,0.04,-34.83
+"Wet","Marsh","L.mar1",1.13,3.29,0.07,-65.64
+"Wet","Marsh","P. paludosus",0.74,1.44,0.11,-48.45
+"Wet","Marsh","P. femoratus",15.59,3.56,0.99,338.47
+"Wet","NP","Coenagrionidae",0.32,0.54,0.32,-41.46
+"Wet","NP","E.eve1",0.46,1.3,0.09,-64.66
+"Wet","NP","F.chr1",0.31,0.45,0.35,-30.68
+"Wet","NP","G.hol1",0.75,0.66,0.53,13.06
+"Wet","NP","G.hol2",1.26,0.68,0.97,83.47
+"Wet","NP","H.for1",1.49,2.39,0.13,-37.7
+"Wet","NP","H.for2",2.29,0.51,1,349.47
+"Wet","NP","L.goo2",2.27,1.35,0.81,67.94
+"Wet","NP","P. paludosus",1.43,0.44,0.97,222.54
+"Wet","NP","P. femoratus",7.48,0.3,1,2358.49
+"Wet","Pond","Amphipoda",5.17,3.45,0.87,49.82
+"Wet","Pond","B. gravida",2.42,2.91,0.49,-16.83
+"Wet","Pond","C.uro1",0.97,1.12,0.57,-12.93
+"Wet","Pond","C.uro2",1.06,2.45,0.04,-56.95
+"Wet","Pond","H.for2",0.3,0.83,0.09,-63.4
+"Wet","Pond","L.goo1",7.08,4.17,0.99,69.68
+"Wet","Pond","L.goo2",6.13,4.55,0.95,34.68
+"Wet","Pond","L.mac1",0.4,1.76,0.01,-77.51
+"Wet","Pond","M.sal1",3.01,1.23,1,144.63
+"Wet","Pond","M.sia1",2.05,2.53,0.15,-19.06
+"Wet","Pond","N.pet1",2.89,0.59,0.99,389.48
+"Wet","Pond","P.lat2",1.38,0.96,0.82,43.43
+"Wet","Pond","P. paludosus",0.68,0.38,0.67,81.06
+"Wet","Pond","T.mar1",8.6,0.49,1,1640.54

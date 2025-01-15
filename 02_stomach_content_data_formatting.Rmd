@@ -24,7 +24,7 @@ library(tidyverse) # data manipulation
 
 # Read in raw data
 ```{r}
-stomachs.raw <- read_csv("Data/Stomach Contents/dpe_stomach_contents_raw_data.csv")
+stomachs.raw <- read_csv("Data/Stomach Contents/FCE1259_dpe_stomach_contents_raw_data.csv")
 
 #remove duplicates
 stomachs.raw <- stomachs.raw %>%

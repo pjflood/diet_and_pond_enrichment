@@ -968,7 +968,7 @@ write.csv(prey.pro.functional, "Outputs/Stomach Contents/Diet/Post-Invasion/post
 These data are analyzed in detail in Flood et al. 2023 - https://doi.org/10.1016/j.fooweb.2022.e00265
 ```{r}
 #load pre-invasion data
-pre.stomachs.raw <- read.csv(file = "Data/Stomach Contents/All_Specimen_by_Number_Correct.csv")
+pre.stomachs.raw <- read.csv(file = "Data/Stomach Contents/FCE1259_All_Specimen_by_Number_Correct.csv")
 ```
 
 Create size-class column

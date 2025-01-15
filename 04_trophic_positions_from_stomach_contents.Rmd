@@ -201,7 +201,7 @@ For convenience, the below data frame is also archived with the data package ass
 ## Pre-invasion load and format data
 ```{r}
 #load data
-pre.trophp <- read.csv("Data/Stomach Contents/pre-invasion_individual_trophic_positions.csv")
+pre.trophp <- read.csv("Data/Stomach Contents/FCE1259_pre-invasion_individual_trophic_positions.csv")
 
 #format
 pre.trophp.formatted <- pre.trophp %>% filter(Ont_Class != 0, !HabDate %in% c("Cladium1", "Cladium2")) %>% 

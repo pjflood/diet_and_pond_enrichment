@@ -1,0 +1,2651 @@
+---
+title: "07_niches_SIBER_stable_isotopes"
+author: "Peter Flood"
+date: "2024-03-04"
+output: 
+  html_document:
+    toc: true
+    df_print: paged
+    number_sections: true
+  html_notebook:
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+Copy over from dpe_iso_niche.R
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load libraries
+```{r}
+library(tidyverse) #data manipulation and plotting via ggplot
+library(SIBER) #modeling isotopic niches
+library(openxlsx) #importing and exporting excel files
+library(coda) #Bayesian model diagnostics
+library(tRophicPosition) #using their pairwise comparisons functions 
+library(ggpubr) #plotting, arranging multiple ggplots 
+library(ggforce) #facet_zoom function
+library(viridis) #color palettes 
+```
+
+# Load data
+```{r}
+iso.merge<-read.csv(file = "Data/Stable Isotopes/isotope_merge_all.csv", header = T)
+```
+
+# Format data for SIBER
+```{r}
+#prepare data for SIBER
+#need to unite the habitat and season columns into a single column called "community"
+iso.slough.hab.season<-unite(iso.merge, col = "community", Slough, Habitat, Season, sep ="_") %>% 
+  mutate(size_class = case_when(
+    is.na(size_class) ~ Species,
+    !is.na(size_class) ~ size_class
+  ))
+
+#isolate only the data needed for SIBER
+iso.siber<-select(iso.slough.hab.season, d13C, d15N, size_class, community)
+colnames(iso.siber)<-c("iso1", "iso2", "group", "community")
+
+#dropping consumers where n < 3 or sd of either isotope is 0
+siber.data<-iso.siber %>%
+  group_by(group, community) %>%
+  filter(n()>2, sd(iso1)!=0, sd(iso2)!=0, !is.na(iso1), !is.na(iso2)) %>% #remove groups with n < 3 and those that didn't get C or N peaks
+  ungroup() %>%
+  as.data.frame() %>% #SIBER needs this step to work 
+  arrange(community, group) #this step makes it so colnames() of ML output are the same order as ellipse model output
+#check what was removed
+removed.consumers<-iso.siber[!(iso.siber$group %in% siber.data$group),]
+
+#createSiberObject
+global.iso.siber<-createSiberObject(siber.data)
+
+#write out samples sizes table
+#write.csv(global.iso.siber[["sample.sizes"]] %>% t(), file = "siber_global_iso_n_table.csv")
+
+iso.sample.size <- global.iso.siber[["sample.sizes"]] %>% t() %>% 
+  as.data.frame() %>% pivot_longer(cols = c(SRS_Edge_Dry:TSL_Pond_Wet), 
+                                   values_to = "n", names_to = "Slough_Habitat_Season") %>% 
+  filter(!is.na(n))
+
+mean(iso.sample.size$n)
+quantile(iso.sample.size$n, c(0.025, 0.5, 0.975))
+max(iso.sample.size$n)
+
+
+# Create lists of plotting arguments to be passed onwards to each 
+# of the three plotting functions.
+community.hulls.args <- list(col = 1, lty = 1, lwd = 1)
+group.ellipses.args  <- list(n = 100, p.interval = 0.95, lty = 1, lwd = 2)
+group.hull.args      <- list(lty = 2, col = "grey20")
+
+par(mfrow=c(1,1))
+plotSiberObject(global.iso.siber,
+                ax.pad = 2, 
+                hulls = F, community.hulls.args, 
+                ellipses = T, group.ellipses.args,
+                group.hulls = T, group.hull.args,
+                bty = "L",
+                iso.order = c(1,2),
+                xlab = expression(d13C),
+                ylab = expression(d15N)
+)
+```
+
+# Calculate TA, SEA, SEAc
+```{r}
+global.iso.ML <- groupMetricsML(global.iso.siber)
+print(global.iso.ML)
+#write.csv(t(global.iso.ML), file = "all_spp_ML_iso.csv")
+```
+
+# Post-Invasion SIBER model
+```{r}
+#set up the model parameters 
+# options for running jags
+parms <- list()
+parms$n.iter <- 2 * 10^6   # number of iterations to run the model for
+parms$n.burnin <- 1 * 10^4 # discard the first set of values
+parms$n.thin <- 100     # thin the posterior by this many
+parms$n.chains <- 2        # run this many chains
+parms$save.output = T
+parms$save.dir = getwd()
+
+# define the priors
+priors <- list()
+priors$R <- 1 * diag(2)
+priors$k <- 2
+priors$tau.mu <- 1.0E-3
+
+# fit the ellipses which uses an Inverse Wishart prior
+# on the covariance matrix Sigma, and a vague normal prior on the 
+# means. Fitting is via the JAGS method.
+global.iso.ellipses.posterior <- siberMVN(global.iso.siber, parms, priors)
+
+#calculate posterior estimates of ellipses for all groups
+SEA.B<-siberEllipses(global.iso.ellipses.posterior)
+colnames(SEA.B)<-names(global.iso.ellipses.posterior)
+```
+
+## Extract Post-Invasion Output
+```{r}
+#calculate credibility intervals
+cr.p<-c(0.5, 0.95, 0.99) #vector of desired quantiles
+
+#call hdrcde_hdr using lapply()
+SEA.B.credibles<-lapply(
+  as.data.frame(SEA.B), 
+  function(x,...){tmp<-hdrcde::hdr(x)$hdr},
+  prob = cr.p)
+
+#match up group names
+names(SEA.B.credibles)<-colnames(global.iso.ML)
+
+#this carries through the row names from matrices in SEA.B.credibles
+#they don't turn out all that clean though, so adding a column later with the same info
+y <- do.call(function(...) {
+  tmp <- plyr::rbind.fill.matrix(...)
+  rownames(tmp) <- sapply(SEA.B.credibles, function(i) {
+    rownames(i)
+  })
+  return(tmp)
+}, SEA.B.credibles)
+
+y
+
+#object with cleaned-up row names
+interval<-rep(c("99%", "95%", "50%"), 321)
+
+#replicated each name three times in sequence to match up with new data frame
+seab.names<-data.frame(rep(names(SEA.B.credibles), each = 3))
+colnames(seab.names)<-"names"
+
+#seab.names<-separate(seab.names, col = names, into = c('hab.season', 'spp'), extra = "merge")
+
+#combine names with new data frame
+seab.cred.matrix<-data.frame(seab.names, interval, y)
+colnames(seab.cred.matrix)<-c(colnames(seab.names), "interval", "lower", "upper")
+
+#write out to a csv
+write.csv(seab.cred.matrix, 
+          file = "Outputs/Stable Isotopes/Trophic Niche/Post-Invasion/global.iso.SEA.B.credibles.csv")
+
+# do similar to get the modes, taking care to pick up multimodal posterior
+# distributions if present
+SEA.B.modes<-lapply(
+  as.data.frame(SEA.B), 
+  function(x,...){tmp<-hdrcde::hdr(x)$mode},
+  prob = cr.p, all.modes=T)
+
+#need to do the same as for the credible intervals to get the colnames to be
+#the names not the numbers
+write.csv(SEA.B.modes, 
+          file = "Outputs/Stable Isotopes/Trophic Niche/Post-Invasion/global.iso.SEA.B.modes.csv")
+
+#read back in
+SEA.B.modes.matrix <- read.csv(file = "Outputs/Stable Isotopes/Trophic Niche/Post-Invasion/global.iso.SEA.B.modes.csv",
+                               header = T,
+                               row.names = 1)
+
+#change colnames
+colnames(SEA.B.modes.matrix)<-colnames(global.iso.ML)
+#transpose this matrix
+SEA.B.modes.matrix.t<-t(SEA.B.modes.matrix)
+#change the name of what is now a single column to mode
+colnames(SEA.B.modes.matrix.t)<-"mode"
+#write out the final csv over the previous mode csv
+write.csv(SEA.B.modes.matrix.t, 
+          file = "Outputs/Stable Isotopes/Trophic Niche/Post-Invasion/global.iso.SEA.B.modes.csv")
+```
+
+## Plots by slough, habitat, season
+### Slough by Habitat
+```{r}
+post.plot.data <- SEA.B %>% as.data.frame() %>% 
+  pivot_longer(everything(), names_to = "Slough_Habitat_Season_Species", values_to = "SEA_B") %>% 
+  separate("Slough_Habitat_Season_Species", into = c("Slough_Habitat_Season", "Species"), 
+           sep = "[//.]", extra = "merge") %>% 
+  separate(Slough_Habitat_Season, into = c("Slough", "Habitat", "Season"), sep = "_") 
+
+#plot these data
+windowsFonts(Times = windowsFont("Times New Roman"))
+
+(post.seab<-ggplot(post.plot.data, aes(x = Species, y = SEA_B, fill = Season))+
+    geom_boxplot(outlier.size = 0,outlier.alpha = 0, lwd = 0.1, alpha = 0.5)+
+    facet_wrap(~Slough*Habitat, scales = "free", ncol = 1)+
+    scale_fill_viridis_d(aesthetics = "fill", option = "D", end = 0.75)+
+    #scale_y_continuous(limits = c(0, 10), expand = c(0.01, 0))+
+    coord_cartesian(ylim = c(0,10))+
+    theme_bw(base_size = 12)+
+    xlab(NULL)+
+    ylab(expression("Stable Isotope Niche Area - SEA"["b"]))+
+    theme(text = element_text(family = "Times", size = 12),
+          axis.text.x = element_text(angle = 45, vjust = 1.1, hjust = 1, size = 4),
+          #panel.border = element_blank(), 
+          #panel.grid.major = element_blank(),
+          #panel.grid.minor = element_blank(), 
+          axis.line = element_line(colour = "black"),
+          axis.ticks.x = element_line(size = 0.05),
+          axis.title = element_text(size = 12), axis.text.x.bottom = element_text(size = 7),
+          axis.text.y = element_text(size = 7), axis.ticks.y = element_line(size = 0.2),
+          legend.title = element_blank(), legend.text = element_text(size = 8),
+          legend.key.size = unit(0.75, "line"))
+  
+)
+
+#ggsave(filename = "post_SEAb.tiff", plot = post.seab, dpi = 600, width = 300, height = 225, units = "mm")
+```
+
+### Seasonal comparisons
+```{r}
+post.plot.data.seasonal.comparisons <- post.plot.data %>%
+  filter(
+    # filter out extraneous habitat levels!Habitat %in% c("Edge", "Sawgrass"),
+    #filter for SRS marsh species size classes with seasonal comparisons
+    Species %in% c(
+      "C.uro1",
+      "CELSPP",
+      "E.eve1",
+      "E.glo1",
+      "E.suc1",
+      "F.chr1",
+      "F.chr2",
+      "G.hol1",
+      "G.hol2",
+      "H.for2",
+      "H.let1",
+      "J.flo2",
+      "L.goo1",
+      "L.goo2",
+      "L.mar1",
+      "L.pun2",
+      "PELFEM"
+    ) &
+      Slough == "SRS" & Habitat == "Marsh" |
+      #now for SRS near-pond species
+      Species %in% c(
+        "E.eve1",
+        "F.chr1",
+        "G.hol1",
+        "G.hol2",
+        "H.for1",
+        "H.for2",
+        "L.goo2",
+        "PALPAL",
+        "PROFAL"
+      ) &
+      Slough == "SRS" & Habitat == "NP" |
+      #now for SRS pond species
+      Species %in% c(
+        "A.nat3",
+        "B.bel1",
+        "BRAGRA",
+        "C.uro1",
+        "CELSPP",
+        "E.suc2",
+        "F.chr1",
+        "F.con1",
+        "H.for1",
+        "H.for2",
+        "J.flo2",
+        "L.goo1",
+        "L.goo2",
+        "L.gul2",
+        "L.gul3",
+        "L.gul4",
+        "L.mar1",
+        "L.mic1",
+        "L.pla1",
+        "L.pun2",
+        "L.pla1",
+        "L.pun2",
+        "P.lat2",
+        "PROALL",
+        "PROFALL"
+      ) & Slough == "SRS" & Habitat == "Pond" |
+      #now do the same for TSL
+      Species %in% c(
+        "CELSPP",
+        "COENAG",
+        "CORIXI",
+        "E.glo1",
+        "EPHEME",
+        "ERYSIM",
+        "F.chr1",
+        "G.hol2",
+        "H.for1",
+        "H.for2",
+        "L.goo1",
+        "L.goo2",
+        "PALPAL"
+      ) &
+      Slough == "TSL" & Habitat == "Marsh" |
+      #no NP dry season TSL data - skip NP
+      Species %in% c(
+        "AMPHIPOD",
+        "G.hol1",
+        "G.hol2",
+        "H.for2",
+        "L.goo1",
+        "L.goo2",
+        "N.pet1"
+      ) & Slough == "TSL" & Habitat == "Pond"
+  ) %>%
+  mutate(
+    Species = case_when(
+      Species == "CELSPP" ~ "Celithemis",
+      Species == "COENAG" ~ "Coenagrionidae",
+      Species == "CORIXI" ~ "Corixidae",
+      Species == "EPHEME" ~ "Ephemeroptera",
+      Species == "ERYSIM" ~ "Erythemis",
+      Species == "PALPAL" ~ "Palaemonetes paludosus",
+      Species == "PELFEM" ~ "Pelocoris femoratus",
+      Species == "AMPHIPOD" ~ "Amphipoda",
+      Species == "BRAGRA" ~ "Brachymesia",
+      Species == "PROALL" ~ "Procambarus alleni",
+      T ~ Species
+    )
+  )
+
+(post.seab.season.plot<-ggplot(post.plot.data.seasonal.comparisons %>% 
+                                 filter(Habitat != "NP") %>% 
+                                 mutate(Season = fct_rev(Season)),
+                               aes(x = Species, y = SEA_B, fill = Season))+
+    geom_boxplot(outlier.size = 0,outlier.alpha = 0, lwd = 0.1, alpha = 0.8)+
+    facet_grid(Slough ~ Habitat, scales = "free")+
+    scale_fill_viridis_d(aesthetics = "fill", begin = 0.2, end = 0.88)+
+    coord_cartesian(ylim = c(0, 10))+
+    theme_bw(base_size = 12)+
+    xlab(NULL)+
+    ylab(expression("Stomach Content Niche Area - SEA"["b"]))+
+    theme(text = element_text(family = "Times", size = 12),
+          axis.text.x = element_text(angle = 45, vjust = 1.05, hjust = 1, size = 4),
+          #panel.border = element_blank(), 
+          #panel.grid.major = element_blank(),
+          #panel.grid.minor = element_blank(), 
+          axis.line = element_line(colour = "black"),
+          axis.ticks.x = element_line(size = 0.05),
+          axis.title = element_text(size = 12), axis.text.x.bottom = element_text(size = 7),
+          axis.text.y = element_text(size = 7), axis.ticks.y = element_line(size = 0.2),
+          legend.title = element_blank(), legend.text = element_text(size = 8),
+          legend.key.size = unit(0.75, "line"))
+  
+)
+
+# ggsave(filename = "post_SEAb_seasonal_comparisons.tiff", plot = post.seab.season.plot,
+#        dpi = 600, height = 150, width = 225, units = "mm")
+
+```
+
+## Niche Ellipse Plots
+
+For adults of the two most abundant fishes
+```{r}
+(iso.niche.ellipse.plot <- ggplot(iso.merge %>% 
+                                    filter(size_class %in% c("G.hol2", "L.goo2"),
+                                           Habitat != "Sawgrass",
+                                           !(Habitat == "NP" & Slough == "TSL")) %>% 
+                                    mutate(Species = case_when(
+                                      size_class == "G.hol2" ~ "Eastern Mosquitofish (adults)",
+                                      size_class == "L.goo2" ~ "Bluefin Killifish (adults)"
+                                    )), 
+                                  aes(x = d13C, y = d15N, color = Season, fill = Season))+
+    stat_conf_ellipse(geom = "polygon", alpha = 0.8)+
+    facet_grid(Species ~ Habitat*Slough, scales = "free")+
+    labs(y = expression(italic(delta)^15*N~("‰")), x = expression(italic(delta)^13*C~("‰")))+
+    scale_fill_viridis_d(end = 0.8)+
+    scale_color_viridis_d(end = 0.8)+
+    theme_bw()+
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+)
+
+# ggsave(filename = "iso_niche_ellipse_plot.tiff", plot = iso.niche.ellipse.plot,
+#        height = 150, width = 200, units = "mm", dpi = 300)
+```
+
+## Post-Invasion Comparisons
+
+Calculate pairwise comparisons
+```{r}
+#turn output into a list
+SEA.B.list <- as.list(as.data.frame(SEA.B))
+
+#do all pairwise comparisons with function from tRophicPosition package
+SEA.B.pairwise <- pairwiseComparisons(SEA.B.list, print = F)
+colnames(SEA.B.pairwise) <- rownames(SEA.B.pairwise)
+```
+
+###Seasonal Comparisons
+#### SRS marsh wet vs dry
+```{r}
+srs.marsh.wet.dry.pairwise <- SEA.B.pairwise %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "SRS", Habitat == "Marsh", Season == "Wet") %>% 
+  #unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>% 
+  select(-c(Slough, Habitat, Season)) %>% 
+  column_to_rownames(var = "SizeClass") %>% 
+  t() %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "SRS", Habitat == "Marsh", Season == "Dry") %>% 
+  filter(SizeClass %in% colnames(.)) %>% 
+  select(Slough, Habitat, Season, SizeClass, matches(.$SizeClass)) %>% 
+  unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season", "SizeClass"), sep = "_") %>% 
+  column_to_rownames(var = "Slough_Habitat_Season_SizeClass")
+
+#format modes to bind with pairwise probs
+srs.marsh.modes.wide <- SEA.B.modes.matrix.t %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "Size Class"), sep = 3) %>% 
+  mutate(`Size Class` = gsub("^.", "", `Size Class`)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "SRS", Habitat == "Marsh") %>% 
+  pivot_wider(id_cols = `Size Class`, names_from = Season, values_from = mode) %>% 
+  filter(!is.na(Wet), !is.na(Dry))
+
+srs.marsh.wet.dry.direct.pairwise <- srs.marsh.wet.dry.pairwise %>% as.matrix() %>% 
+  diag() %>% as.data.frame() %>% 
+  mutate(Slough_Habitat_Season_SizeClass = rownames(srs.marsh.wet.dry.pairwise)) %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season", "Size Class"), sep = "_") %>% 
+  filter(!`Size Class` %in% c("Green Algae", "FLOC", "PERMAT", "PEREPI")) %>% 
+  merge(., srs.marsh.modes.wide, by = "Size Class") %>% 
+  select(`Size Class`, contains("Wet"), contains("Dry"), everything()) %>% select(-c(Season)) %>% 
+  rename(`Dry < Wet` = ".") %>% 
+  mutate(#`Pre > Post` = 1 - `Pre < Post`,
+    Direction = case_when(
+      `Dry < Wet` >= 0.95 ~ "Decrease",
+      `Dry < Wet` < 0.05 ~ "Increase",
+      `Dry < Wet` > 0.05 | `Dry < Wet` < 0.95 ~ "No Change"),
+    `Percent Change` = ((Wet-Dry)/Dry)*100,
+    `Size Class` = case_when(
+      `Size Class` == "CELSPP" ~ "Celithimus spp.",
+      `Size Class` == "PALPAL" ~ "P. paludosus",
+      `Size Class` == "PELFEM" ~ "P. femoratus",
+      TRUE ~ `Size Class`)) %>% 
+  mutate(across(where(is.numeric), round, digits = 2)) %>% 
+  select(Slough, Habitat, `Size Class`, Wet, Dry, `Dry < Wet`, `Percent Change`)
+
+#write this out to excel
+# write.xlsx(srs.marsh.wet.dry.direct.pairwise, 
+#            file = "srs_marsh_wet_dry_SEAB_prob_diff.xlsx")
+```
+
+#### SRS near pond wet vs dry
+```{r}
+srs.np.wet.dry.pairwise <- SEA.B.pairwise %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "SRS", Habitat == "NP", Season == "Wet") %>% 
+  #unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>% 
+  select(-c(Slough, Habitat, Season)) %>% 
+  column_to_rownames(var = "SizeClass") %>% 
+  t() %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "SRS", Habitat == "NP", Season == "Dry") %>% 
+  filter(SizeClass %in% colnames(.)) %>% 
+  select(Slough, Habitat, Season, SizeClass, matches(.$SizeClass)) %>% 
+  unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season", "SizeClass"), sep = "_") %>% 
+  column_to_rownames(var = "Slough_Habitat_Season_SizeClass")
+
+#format modes to bind with pairwise probs
+srs.np.modes.wide <- SEA.B.modes.matrix.t %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "Size Class"), sep = 3) %>% 
+  mutate(`Size Class` = gsub("^.", "", `Size Class`)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "SRS", Habitat == "NP") %>% 
+  pivot_wider(id_cols = `Size Class`, names_from = Season, values_from = mode) %>% 
+  filter(!is.na(Wet), !is.na(Dry))
+
+srs.np.wet.dry.direct.pairwise <- srs.np.wet.dry.pairwise %>% as.matrix() %>% 
+  diag() %>% as.data.frame() %>% 
+  mutate(Slough_Habitat_Season_SizeClass = rownames(srs.np.wet.dry.pairwise)) %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season", "Size Class"), sep = "_") %>% 
+  filter(!`Size Class` %in% c("Green Algae", "FLOC", "PERMAT", "PEREPI")) %>% 
+  merge(., srs.np.modes.wide, by = "Size Class") %>% 
+  select(`Size Class`, contains("Wet"), contains("Dry"), everything()) %>% select(-c(Season)) %>% 
+  rename(`Dry < Wet` = ".") %>% 
+  mutate(#`Pre > Post` = 1 - `Pre < Post`,
+    Direction = case_when(
+      `Dry < Wet` >= 0.95 ~ "Decrease",
+      `Dry < Wet` < 0.05 ~ "Increase",
+      `Dry < Wet` > 0.05 | `Dry < Wet` < 0.95 ~ "No Change"),
+    `Percent Change` = ((Wet-Dry)/Dry)*100,
+    `Size Class` = case_when(
+      `Size Class` == "CELSPP" ~ "Celithimus spp.",
+      `Size Class` == "PALPAL" ~ "P. paludosus",
+      `Size Class` == "PELFEM" ~ "P. femoratus",
+      `Size Class` == "PROFAL" ~ "P. fallax",
+      TRUE ~ `Size Class`)) %>% 
+  mutate(across(where(is.numeric), round, digits = 2)) %>% 
+  select(Slough, Habitat, `Size Class`, Wet, Dry, `Dry < Wet`, `Percent Change`)
+
+#write this out to excel
+# write.xlsx(srs.np.wet.dry.direct.pairwise, 
+#            file = "srs_np_wet_dry_SEAB_prob_diff.xlsx")
+```
+
+#### SRS pond wet vs dry 
+```{r}
+srs.pond.wet.dry.pairwise <- SEA.B.pairwise %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "SRS", Habitat == "Pond", Season == "Wet") %>% 
+  #unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>% 
+  select(-c(Slough, Habitat, Season)) %>% 
+  column_to_rownames(var = "SizeClass") %>% 
+  t() %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "SRS", Habitat == "Pond", Season == "Dry") %>% 
+  filter(SizeClass %in% colnames(.)) %>% 
+  select(Slough, Habitat, Season, SizeClass, matches(.$SizeClass)) %>% 
+  unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season", "SizeClass"), sep = "_") %>% 
+  column_to_rownames(var = "Slough_Habitat_Season_SizeClass")
+
+#format modes to bind with pairwise probs
+srs.pond.modes.wide <- SEA.B.modes.matrix.t %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "Size Class"), sep = 3) %>% 
+  mutate(`Size Class` = gsub("^.", "", `Size Class`)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "SRS", Habitat == "Pond") %>% 
+  pivot_wider(id_cols = `Size Class`, names_from = Season, values_from = mode) %>% 
+  filter(!is.na(Wet), !is.na(Dry))
+
+srs.pond.wet.dry.direct.pairwise <- srs.pond.wet.dry.pairwise %>% as.matrix() %>% 
+  diag() %>% as.data.frame() %>% 
+  mutate(Slough_Habitat_Season_SizeClass = rownames(srs.pond.wet.dry.pairwise)) %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season", "Size Class"), sep = "_") %>% 
+  filter(!`Size Class` %in% c("Green Algae", "FLOC", "PERMAT", "PEREPI")) %>% 
+  merge(., srs.pond.modes.wide, by = "Size Class") %>% 
+  select(`Size Class`, contains("Wet"), contains("Dry"), everything()) %>% select(-c(Season)) %>% 
+  rename(`Dry < Wet` = ".") %>% 
+  mutate(#`Pre > Post` = 1 - `Pre < Post`,
+    Direction = case_when(
+      `Dry < Wet` >= 0.95 ~ "Decrease",
+      `Dry < Wet` < 0.05 ~ "Increase",
+      `Dry < Wet` > 0.05 | `Dry < Wet` < 0.95 ~ "No Change"),
+    `Percent Change` = ((Wet-Dry)/Dry)*100,
+    `Size Class` = case_when(
+      `Size Class` == "CELSPP" ~ "Celithimus spp.",
+      `Size Class` == "PALPAL" ~ "P. paludosus",
+      `Size Class` == "PELFEM" ~ "P. femoratus",
+      `Size Class` == "PROFAL" ~ "P. fallax",
+      `Size Class` == "PROALL" ~ "P. alleni",
+      `Size Class` == "BRAGRA" ~ "B. gravida",
+      TRUE ~ `Size Class`)) %>% 
+  mutate(across(where(is.numeric), round, digits = 2)) %>% 
+  select(Slough, Habitat, `Size Class`, Wet, Dry, `Dry < Wet`, `Percent Change`)
+
+#write this out to excel
+# write.xlsx(srs.pond.wet.dry.direct.pairwise, 
+#            file = "srs_pond_wet_dry_SEAB_prob_diff.xlsx")
+```
+
+#### TSL marsh wet vs dry
+```{r}
+tsl.marsh.wet.dry.pairwise <- SEA.B.pairwise %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "TSL", Habitat == "Marsh", Season == "Wet") %>% 
+  #unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>% 
+  select(-c(Slough, Habitat, Season)) %>% 
+  column_to_rownames(var = "SizeClass") %>% 
+  t() %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "TSL", Habitat == "Marsh", Season == "Dry") %>% 
+  filter(SizeClass %in% colnames(.)) %>% 
+  select(Slough, Habitat, Season, SizeClass, matches(.$SizeClass)) %>% 
+  unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season", "SizeClass"), sep = "_") %>% 
+  column_to_rownames(var = "Slough_Habitat_Season_SizeClass")
+
+#format modes to bind with pairwise probs
+tsl.marsh.modes.wide <- SEA.B.modes.matrix.t %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "Size Class"), sep = 3) %>% 
+  mutate(`Size Class` = gsub("^.", "", `Size Class`)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "TSL", Habitat == "Marsh") %>% 
+  pivot_wider(id_cols = `Size Class`, names_from = Season, values_from = mode) %>% 
+  filter(!is.na(Wet), !is.na(Dry))
+
+tsl.marsh.wet.dry.direct.pairwise <- tsl.marsh.wet.dry.pairwise %>% as.matrix() %>% 
+  diag() %>% as.data.frame() %>% 
+  mutate(Slough_Habitat_Season_SizeClass = rownames(tsl.marsh.wet.dry.pairwise)) %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season", "Size Class"), sep = "_") %>% 
+  filter(!`Size Class` %in% c("Green Algae", "FLOC", "PERMAT", "PEREPI")) %>% 
+  merge(., tsl.marsh.modes.wide, by = "Size Class") %>% 
+  select(`Size Class`, contains("Wet"), contains("Dry"), everything()) %>% select(-c(Season)) %>% 
+  rename(`Dry < Wet` = ".") %>% 
+  mutate(#`Pre > Post` = 1 - `Pre < Post`,
+    Direction = case_when(
+      `Dry < Wet` >= 0.95 ~ "Decrease",
+      `Dry < Wet` < 0.05 ~ "Increase",
+      `Dry < Wet` > 0.05 | `Dry < Wet` < 0.95 ~ "No Change"),
+    `Percent Change` = ((Wet-Dry)/Dry)*100,
+    `Size Class` = case_when(
+      `Size Class` == "BLUE MITE" ~ "Hydrachnidia",
+      `Size Class` == "CELSPP" ~ "Celithimus spp.",
+      `Size Class` == "PALPAL" ~ "P. paludosus",
+      `Size Class` == "PELFEM" ~ "P. femoratus",
+      `Size Class` == "CHIRON" ~  "Chironomidae",
+      `Size Class` == "COENAG" ~ "Coenagrionidae",
+      `Size Class` == "COPEPOD" ~ "Copepoda",
+      `Size Class` == "CORIXI" ~ "Corixidae",
+      `Size Class` == "EPHEME" ~ "Ephemeroptera",
+      `Size Class` == "ERYSIM" ~ "E. simplicicollis",
+      `Size Class` == "GERRID" ~ "Gerridae",
+      TRUE ~ `Size Class`)) %>% 
+  mutate(across(where(is.numeric), round, digits = 2)) %>% 
+  select(Slough, Habitat, `Size Class`, Wet, Dry, `Dry < Wet`, `Percent Change`)
+
+#write this out to excel
+# write.xlsx(tsl.marsh.wet.dry.direct.pairwise, 
+#            file = "tsl_marsh_wet_dry_SEAB_prob_diff.xlsx")
+```
+
+#### TSL near pond wet vs dry
+```{r}
+tsl.np.wet.dry.pairwise <- SEA.B.pairwise %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "TSL", Habitat == "NP", Season == "Wet") %>% 
+  #unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>% 
+  select(-c(Slough, Habitat, Season)) %>% 
+  column_to_rownames(var = "SizeClass") %>% 
+  t() %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "TSL", Habitat == "NP", Season == "Dry") %>% 
+  filter(SizeClass %in% colnames(.)) %>% 
+  select(Slough, Habitat, Season, SizeClass, matches(.$SizeClass)) %>% 
+  unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season", "SizeClass"), sep = "_") %>% 
+  column_to_rownames(var = "Slough_Habitat_Season_SizeClass")
+
+#format modes to bind with pairwise probs
+tsl.np.modes.wide <- SEA.B.modes.matrix.t %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "Size Class"), sep = 3) %>% 
+  mutate(`Size Class` = gsub("^.", "", `Size Class`)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "TSL", Habitat == "NP") %>% 
+  pivot_wider(id_cols = `Size Class`, names_from = Season, values_from = mode) %>% 
+  filter(!is.na(Wet), !is.na(Dry))
+
+tsl.np.wet.dry.direct.pairwise <- tsl.np.wet.dry.pairwise %>% as.matrix() %>% 
+  diag() %>% as.data.frame() %>% 
+  mutate(Slough_Habitat_Season_SizeClass = rownames(tsl.np.wet.dry.pairwise)) %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season", "Size Class"), sep = "_") %>% 
+  filter(!`Size Class` %in% c("Green Algae", "FLOC", "PERMAT", "PEREPI")) %>% 
+  merge(., tsl.np.modes.wide, by = "Size Class") %>% 
+  select(`Size Class`, contains("Wet"), contains("Dry"), everything()) %>% select(-c(Season)) %>% 
+  rename(`Dry < Wet` = ".") %>% 
+  mutate(#`Pre > Post` = 1 - `Pre < Post`,
+    Direction = case_when(
+      `Dry < Wet` >= 0.95 ~ "Decrease",
+      `Dry < Wet` < 0.05 ~ "Increase",
+      `Dry < Wet` > 0.05 | `Dry < Wet` < 0.95 ~ "No Change"),
+    `Percent Change` = ((Wet-Dry)/Dry)*100,
+    `Size Class` = case_when(
+      `Size Class` == "BLUE MITE" ~ "Hydrachnidia",
+      `Size Class` == "CLADOCERA" ~ "Cladocera",
+      `Size Class` == "COPEPOD" ~ "Copepoda",
+      TRUE ~ `Size Class`)) %>% 
+  mutate(across(where(is.numeric), round, digits = 2)) %>% 
+  select(Slough, Habitat, `Size Class`, Wet, Dry, `Dry < Wet`, `Percent Change`)
+
+#write this out to excel
+# write.xlsx(tsl.np.wet.dry.direct.pairwise, 
+#            file = "tsl_np_wet_dry_SEAB_prob_diff.xlsx")
+```
+
+#### TSL pond wet vs dry
+```{r}
+tsl.pond.wet.dry.pairwise <- SEA.B.pairwise %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "TSL", Habitat == "Pond", Season == "Wet") %>% 
+  #unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>% 
+  select(-c(Slough, Habitat, Season)) %>% 
+  column_to_rownames(var = "SizeClass") %>% 
+  t() %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "TSL", Habitat == "Pond", Season == "Dry") %>% 
+  filter(SizeClass %in% colnames(.)) %>% 
+  select(Slough, Habitat, Season, SizeClass, matches(.$SizeClass)) %>% 
+  unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season", "SizeClass"), sep = "_") %>% 
+  column_to_rownames(var = "Slough_Habitat_Season_SizeClass")
+
+#format modes to bind with pairwise probs
+tsl.pond.modes.wide <- SEA.B.modes.matrix.t %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "Size Class"), sep = 3) %>% 
+  mutate(`Size Class` = gsub("^.", "", `Size Class`)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "TSL", Habitat == "Pond") %>% 
+  pivot_wider(id_cols = `Size Class`, names_from = Season, values_from = mode) %>% 
+  filter(!is.na(Wet), !is.na(Dry))
+
+tsl.pond.wet.dry.direct.pairwise <- tsl.pond.wet.dry.pairwise %>% as.matrix() %>% 
+  diag() %>% as.data.frame() %>% 
+  mutate(Slough_Habitat_Season_SizeClass = rownames(tsl.pond.wet.dry.pairwise)) %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season", "Size Class"), sep = "_") %>% 
+  filter(!`Size Class` %in% c("Green Algae", "FLOC", "PERMAT", "PEREPI")) %>% 
+  merge(., tsl.pond.modes.wide, by = "Size Class") %>% 
+  select(`Size Class`, contains("Wet"), contains("Dry"), everything()) %>% select(-c(Season)) %>% 
+  rename(`Dry < Wet` = ".") %>% 
+  mutate(#`Pre > Post` = 1 - `Pre < Post`,
+    Direction = case_when(
+      `Dry < Wet` >= 0.95 ~ "Decrease",
+      `Dry < Wet` < 0.05 ~ "Increase",
+      `Dry < Wet` > 0.05 | `Dry < Wet` < 0.95 ~ "No Change"),
+    `Percent Change` = ((Wet-Dry)/Dry)*100,
+    `Size Class` = case_when(
+      `Size Class` == "CELSPP" ~ "Celithimus spp.",
+      `Size Class` == "PALPAL" ~ "P. paludosus",
+      `Size Class` == "PELFEM" ~ "P. femoratus",
+      `Size Class` == "PROFAL" ~ "P. fallax",
+      `Size Class` == "PROALL" ~ "P. alleni",
+      `Size Class` == "BRAGRA" ~ "B. gravida",
+      `Size Class` == "AMPHIPOD" ~ "Amphipoda",
+      `Size Class` == "COPEPOD" ~ "Copepoda",
+      TRUE ~ `Size Class`)) %>% 
+  mutate(across(where(is.numeric), round, digits = 2)) %>% 
+  select(Slough, Habitat, `Size Class`, Wet, Dry, `Dry < Wet`, `Percent Change`)
+
+#write this out to excel
+# write.xlsx(tsl.pond.wet.dry.direct.pairwise, 
+#            file = "tsl_pond_wet_dry_SEAB_prob_diff.xlsx")
+```
+
+#### Combine seasonal pairwise comparisons
+```{r}
+seasonal.pairwise <- bind_rows(srs.marsh.wet.dry.direct.pairwise, srs.np.wet.dry.direct.pairwise, srs.pond.wet.dry.direct.pairwise,
+                               tsl.marsh.wet.dry.direct.pairwise, tsl.np.wet.dry.direct.pairwise, tsl.pond.wet.dry.direct.pairwise)
+
+write.csv(seasonal.pairwise, 
+           "Outputs/Stable Isotopes/Trophic Niche/Post-Invasion/season_pairiwise.csv")
+
+#proportion of statistical changes in wet-dry comparisons
+sum(seasonal.pairwise$`Dry < Wet`>=0.95 | seasonal.pairwise$`Dry < Wet`<=0.05)/nrow(seasonal.pairwise) 
+
+seasonal.pairwise %>% 
+  filter(`Dry < Wet` >= 0.95 | `Dry < Wet` <= 0.05) %>% 
+  mutate(`Percent Change` = abs(`Percent Change`)) %>% 
+  summarize_at(.vars = "Percent Change", list(mean = mean, sd = sd))
+
+#break it down per habitat
+#marsh
+#frequency
+sum(srs.marsh.wet.dry.direct.pairwise$`Dry < Wet`>=0.95 | 
+      srs.marsh.wet.dry.direct.pairwise$`Dry < Wet`<=0.05,
+    tsl.marsh.wet.dry.direct.pairwise$`Dry < Wet`>=0.95|
+      tsl.marsh.wet.dry.direct.pairwise$`Dry < Wet`<=0.05)/
+  nrow(bind_rows(srs.marsh.wet.dry.direct.pairwise, tsl.marsh.wet.dry.direct.pairwise))
+#magnitude
+bind_rows(srs.marsh.wet.dry.direct.pairwise, tsl.marsh.wet.dry.direct.pairwise) %>% 
+  filter(`Dry < Wet` >= 0.95 | `Dry < Wet` <= 0.05) %>% 
+  mutate(`Percent Change` = abs(`Percent Change`)) %>% 
+  summarize_at(.vars = "Percent Change", list(mean = mean, sd = sd))
+
+#np
+#frequency
+sum(srs.np.wet.dry.direct.pairwise$`Dry < Wet`>=0.95 | 
+      srs.np.wet.dry.direct.pairwise$`Dry < Wet`<=0.05,
+    tsl.np.wet.dry.direct.pairwise$`Dry < Wet`>=0.95|
+      tsl.np.wet.dry.direct.pairwise$`Dry < Wet`<=0.05)/
+  nrow(bind_rows(srs.np.wet.dry.direct.pairwise, tsl.np.wet.dry.direct.pairwise))
+#magnitude
+bind_rows(srs.np.wet.dry.direct.pairwise, tsl.np.wet.dry.direct.pairwise) %>% 
+  filter(`Dry < Wet` >= 0.95 | `Dry < Wet` <= 0.05) %>% 
+  mutate(`Percent Change` = abs(`Percent Change`)) %>% 
+  summarize_at(.vars = "Percent Change", list(mean = mean, sd = sd))
+
+#pond
+#frequency
+sum(srs.pond.wet.dry.direct.pairwise$`Dry < Wet`>=0.95 | 
+      srs.pond.wet.dry.direct.pairwise$`Dry < Wet`<=0.05,
+    tsl.pond.wet.dry.direct.pairwise$`Dry < Wet`>=0.95|
+      tsl.pond.wet.dry.direct.pairwise$`Dry < Wet`<=0.05)/
+  nrow(bind_rows(srs.pond.wet.dry.direct.pairwise, tsl.pond.wet.dry.direct.pairwise))
+#magnitude
+bind_rows(srs.pond.wet.dry.direct.pairwise, tsl.pond.wet.dry.direct.pairwise) %>% 
+  filter(`Dry < Wet` >= 0.95 | `Dry < Wet` <= 0.05) %>% 
+  mutate(`Percent Change` = abs(`Percent Change`)) %>% 
+  summarize_at(.vars = "Percent Change", list(mean = mean, sd = sd))
+```
+
+#### Plot seasonal percent change
+```{r}
+#Format data for plotting
+all.season.direct.pairwise <- bind_rows(
+  srs.marsh.wet.dry.direct.pairwise,
+  srs.np.wet.dry.direct.pairwise,
+  srs.pond.wet.dry.direct.pairwise,
+  tsl.marsh.wet.dry.direct.pairwise,
+  tsl.pond.wet.dry.direct.pairwise #no tsl.np.wet.dry.direct.pairwise
+) %>%
+  mutate(`Size Class` = case_when(`Size Class` == "C.uro1" ~ "M.uro1",
+                                  T ~ `Size Class`)) %>%
+  rename(`Wet < Dry` = `Dry < Wet`) %>%
+  mutate(
+    Trophic_Guild = case_when(
+      `Size Class` %in% c ("Ephemeroptera") ~ "Herbivore",
+      `Size Class` %in% c("P.lat2", "Amphipoda", "Chironomidae", "Copepoda") ~ "Detritivore",
+      `Size Class` %in% c(
+        "M.uro1",
+        "H.let1",
+        "G.hol1",
+        "G.hol2",
+        "E.suc1",
+        "E.suc2",
+        "J.flo2",
+        "P. alleni",
+        "P. fallax",
+        "P. paludosus"
+      ) ~ "Omnivore",
+      `Size Class` %in% c(
+        "N.pet1",
+        "L.goo1",
+        "L.goo2",
+        "H.for1",
+        "H.for2",
+        "F.chr1",
+        "F.chr2",
+        "B. gravida",
+        "Celithimus spp.",
+        "Coenagrionidae",
+        "Corixidae",
+        "E. simplicicollis",
+        "E.eve1",
+        "E.glo1",
+        "Gerridae",
+        "Hydrachnidia",
+        "L.mar1",
+        "L.mic1",
+        "P. femoratus"
+      ) ~ "Invertivore",
+      `Size Class` %in% c(
+        "L.pun2",
+        "L.pla1",
+        "L.gul4",
+        "L.gul3",
+        "L.gul2",
+        "A.nat3",
+        "B.bel1",
+        "F.con1"
+      ) ~ "Mesopredator"
+    ),
+    Trophic_Score = case_when(
+      Trophic_Guild == "Mesopredator" ~ 5,
+      Trophic_Guild == "Invertivore" ~ 4,
+      Trophic_Guild == "Omnivore" ~ 3,
+      Trophic_Guild == "Detritivore" ~ 2,
+      Trophic_Guild == "Herbivore" ~ 1
+    ),
+    `Size Class` = fct_reorder(`Size Class`, Trophic_Score)
+  ) %>%
+  rename(`Trophic Guild` = Trophic_Guild)
+
+#Generate plots
+windowsFonts(Times = windowsFont("Times New Roman"))
+
+(season.percent.change.plot <- ggplot(data = all.season.direct.pairwise, 
+                                      aes(y = `Size Class`, x = `Percent Change`, fill = Habitat, 
+                                          color = Habitat, shape = Slough))+
+    geom_point(aes(size = `Wet < Dry`))+
+    scale_shape_manual(values = c(22,24))+
+    scale_fill_viridis_d(end = 0.8)+
+    scale_color_viridis_d(end = 0.8)+
+    scale_size_continuous(breaks = c(0.05, 0.25, 0.75, 0.95))+
+    facet_zoom(xlim = c(-100, 100))+
+    geom_hline(yintercept = 34.5, linetype = "dashed", color = viridis(n=4, option = "A")[1])+
+    geom_hline(yintercept = 15.5, linetype = "dashed", color = viridis(n=4, option = "A")[2])+
+    geom_hline(yintercept = 5.5, linetype = "dashed", color = viridis(n=4, option = "A")[3])+
+    geom_hline(yintercept = 1.5, linetype = "dashed", color = viridis(n=4, option = "A")[4])+
+    theme_bw()+
+    theme(text = element_text(family = "Times"),
+          axis.text.y = element_text(size = 6))
+  
+)
+
+# ggsave("stable_isotopes_season_percent_change_plot.tiff", 
+#        plot = season.percent.change.plot, 
+#        dpi = 600, height = 250, width = 150, units = "mm")
+
+#boxplot for percent change per habitat across all species
+(season.percent.change.boxplot <- ggplot(data = all.season.direct.pairwise %>% 
+                                           mutate(Habitat = gsub("NP", "Near Pond", Habitat)), 
+                                         aes(y = `Percent Change`, x = Habitat))+
+    geom_boxplot()+
+    facet_zoom(ylim = c(-100, 100))+
+    scale_x_discrete(limits = c("Pond", "Near Pond", "Marsh"))+
+    theme_bw()+
+    theme(text = element_text(family = "Times"))
+  
+)
+
+all.season.direct.pairwise.long <- all.season.direct.pairwise %>% 
+  pivot_longer(cols = c(Wet, Dry), names_to = "Season", values_to = "Niche Area") %>% 
+  mutate(Habitat = gsub("NP", "Near Pond", Habitat))
+
+
+(season.niche.area.habitat.plot <- ggplot(data = all.season.direct.pairwise.long,
+                                          aes(x = Season, y = `Niche Area`))+
+    geom_boxplot()+
+    facet_zoom(ylim = c(0, 1))+
+    facet_wrap(~Habitat)+
+    scale_x_discrete(limits = c("Wet", "Dry"))
+  #coord_cartesian(ylim = c(0,1))
+  
+)
+
+season.niche.shifts <- all.season.direct.pairwise.long %>% 
+  filter(`Wet < Dry` <= 0.05 | `Wet < Dry` >= 0.95)
+
+season.niche.shifts %>% group_by(Habitat, Season) %>% tally()
+
+(si.season.niche.area.shifts.habitat.plot <- ggplot(data = season.niche.shifts,
+                                                 aes(x = Season, y = `Niche Area`))+
+    geom_boxplot()+
+    #geom_violin(draw_quantiles = 0.5, alpha = 0.5)+
+    #facet_zoom(ylim = c(0, 1))+
+    facet_wrap(~Habitat, scales = "free")+
+    scale_x_discrete(limits = c("Wet", "Dry"))+
+    #coord_cartesian(ylim = c(0,6))+
+    ylab(label = expression(Niche[SIA]))+
+    theme_bw()+
+    theme(text = element_text(family = "Times", size = 8),
+          axis.text = element_text(size = 6))
+  
+)
+
+# ggsave("stable_isotope_seasonal_niche_shifts_per_habitat.tiff", 
+#        plot = si.season.niche.area.shifts.habitat.plot, 
+#        dpi = 600, height = 150, width = 250, units = "mm")
+
+season.niche.shifts %>% group_by(Habitat, Season, `Trophic Guild`) %>% tally() %>% 
+  arrange(Habitat, `Trophic Guild`) %>% print(n = 26)
+
+(si.season.niche.area.shifts.guild.habitat.plot <- ggplot(data = season.niche.shifts,
+                                                 aes(x = Season, y = `Niche Area`))+
+    geom_boxplot()+
+    #geom_violin(draw_quantiles = 0.5, alpha = 0.5)+
+    #facet_zoom(ylim = c(0, 1))+
+    facet_wrap(~Habitat*`Trophic Guild`, scales = "free_y")+
+    scale_x_discrete(limits = c("Wet", "Dry"))+
+    #coord_cartesian(ylim = c(0,6))+
+    ylab(label = expression(Niche[SIA]))+
+    theme_bw()+
+    theme(text = element_text(family = "Times", size = 8),
+            axis.text = element_text(size = 6))
+  
+)
+
+# ggsave("stable_isotope_seasonal_niche_shifts_guild_per_habitat.tiff", 
+#        plot = si.season.niche.area.shifts.guild.habitat.plot, 
+#        dpi = 600, height = 150, width = 250, units = "mm")
+
+```
+
+###Slough Comparisons
+#### Marsh wet season
+```{r}
+slough.marsh.wet.pairwise <- SEA.B.pairwise %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "SRS", Habitat == "Marsh", Season == "Wet") %>% 
+  #unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>% 
+  select(-c(Slough, Habitat, Season)) %>% 
+  column_to_rownames(var = "SizeClass") %>% 
+  t() %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "TSL", Habitat == "Marsh", Season == "Wet") %>% 
+  filter(SizeClass %in% colnames(.)) %>% 
+  select(Slough, Habitat, Season, SizeClass, matches(.$SizeClass)) %>% 
+  unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season", "SizeClass"), sep = "_") %>% 
+  column_to_rownames(var = "Slough_Habitat_Season_SizeClass")
+
+#format modes to bind with pairwise probs
+slough.marsh.wet.modes.wide <- SEA.B.modes.matrix.t %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "Size Class"), sep = 3) %>% 
+  mutate(`Size Class` = gsub("^.", "", `Size Class`)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Season == "Wet", Habitat == "Marsh") %>% 
+  pivot_wider(id_cols = `Size Class`, names_from = Slough, values_from = mode) %>% 
+  filter(!is.na(SRS), !is.na(TSL))
+
+slough.marsh.wet.direct.pairwise <- slough.marsh.wet.pairwise %>% as.matrix() %>% 
+  diag() %>% as.data.frame() %>% 
+  mutate(Slough_Habitat_Season_SizeClass = rownames(slough.marsh.wet.pairwise)) %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season", "Size Class"), sep = "_") %>% 
+  filter(!`Size Class` %in% c("Green Algae", "FLOC", "PERMAT", "PEREPI")) %>% 
+  merge(., slough.marsh.wet.modes.wide, by = "Size Class") %>% 
+  select(`Size Class`, contains("TSL"), contains("SRS"), everything()) %>% select(-c(Slough)) %>% 
+  rename(`TSL < SRS` = ".") %>% 
+  mutate(#`Pre > Post` = 1 - `Pre < Post`,
+    Direction = case_when(
+      `TSL < SRS` >= 0.95 ~ "Decrease",
+      `TSL < SRS` < 0.05 ~ "Increase",
+      `TSL < SRS` > 0.05 | `TSL < SRS` < 0.95 ~ "No Change"),
+    `Percent Change` = ((TSL-SRS)/SRS)*100,
+    `Size Class` = case_when(
+      `Size Class` == "BELSPP" ~ "Belostoma spp.",
+      `Size Class` == "CHIRON" ~ "Chironomidae",
+      `Size Class` == "COENAG" ~ "Coenagrionidae",
+      `Size Class` == "CELSPP" ~ "Celithimus spp.",
+      `Size Class` == "PALPAL" ~ "P. paludosus",
+      `Size Class` == "PELFEM" ~ "P. femoratus",
+      `Size Class` == "PROFAL" ~ "P. fallax",
+      `Size Class` == "PROALL" ~ "P. alleni",
+      `Size Class` == "BRAGRA" ~ "B. gravida",
+      `Size Class` == "AMPHIPOD" ~ "Amphipoda",
+      `Size Class` == "COPEPOD" ~ "Copepoda",
+      TRUE ~ `Size Class`)) %>% 
+  mutate(across(where(is.numeric), round, digits = 2)) %>% 
+  select(Season, Habitat, `Size Class`, TSL, SRS, `TSL < SRS`, `Percent Change`)
+
+#write this out to excel
+#write.xlsx(slough.marsh.wet.direct.pairwise, file = "slough_marsh_wet_SEAB_prob_diff.xlsx")
+```
+
+#### Near pond wet season
+```{r}
+slough.np.wet.pairwise <- SEA.B.pairwise %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "SRS", Habitat == "NP", Season == "Wet") %>% 
+  #unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>% 
+  select(-c(Slough, Habitat, Season)) %>% 
+  column_to_rownames(var = "SizeClass") %>% 
+  t() %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "TSL", Habitat == "NP", Season == "Wet") %>% 
+  filter(SizeClass %in% colnames(.)) %>% 
+  select(Slough, Habitat, Season, SizeClass, matches(.$SizeClass)) %>% 
+  unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season", "SizeClass"), sep = "_") %>% 
+  column_to_rownames(var = "Slough_Habitat_Season_SizeClass")
+
+#format modes to bind with pairwise probs
+slough.np.wet.modes.wide <- SEA.B.modes.matrix.t %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "Size Class"), sep = 3) %>% 
+  mutate(`Size Class` = gsub("^.", "", `Size Class`)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Season == "Wet", Habitat == "NP") %>% 
+  pivot_wider(id_cols = `Size Class`, names_from = Slough, values_from = mode) %>% 
+  filter(!is.na(SRS), !is.na(TSL))
+
+slough.np.wet.direct.pairwise <- slough.np.wet.pairwise %>% as.matrix() %>% 
+  diag() %>% as.data.frame() %>% 
+  mutate(Slough_Habitat_Season_SizeClass = rownames(slough.np.wet.pairwise)) %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season", "Size Class"), sep = "_") %>% 
+  filter(!`Size Class` %in% c("Green Algae", "FLOC", "PERMAT", "PEREPI")) %>% 
+  merge(., slough.np.wet.modes.wide, by = "Size Class") %>% 
+  select(`Size Class`, contains("TSL"), contains("SRS"), everything()) %>% select(-c(Slough)) %>% 
+  rename(`TSL < SRS` = ".") %>% 
+  mutate(#`Pre > Post` = 1 - `Pre < Post`,
+    Direction = case_when(
+      `TSL < SRS` >= 0.95 ~ "Decrease",
+      `TSL < SRS` < 0.05 ~ "Increase",
+      `TSL < SRS` > 0.05 | `TSL < SRS` < 0.95 ~ "No Change"),
+    `Percent Change` = ((TSL-SRS)/SRS)*100,
+    `Size Class` = case_when(
+      `Size Class` == "BELSPP" ~ "Belostoma spp.",
+      `Size Class` == "CHIRON" ~ "Chironomidae",
+      `Size Class` == "COENAG" ~ "Coenagrionidae",
+      `Size Class` == "CELSPP" ~ "Celithimus spp.",
+      `Size Class` == "PALPAL" ~ "P. paludosus",
+      `Size Class` == "PELFEM" ~ "P. femoratus",
+      `Size Class` == "PROFAL" ~ "P. fallax",
+      `Size Class` == "PROALL" ~ "P. alleni",
+      `Size Class` == "BRAGRA" ~ "B. gravida",
+      `Size Class` == "AMPHIPOD" ~ "Amphipoda",
+      `Size Class` == "COPEPOD" ~ "Copepoda",
+      TRUE ~ `Size Class`)) %>% 
+  mutate(across(where(is.numeric), round, digits = 2)) %>% 
+  select(Season, Habitat, `Size Class`, TSL, SRS, `TSL < SRS`, `Percent Change`)
+
+#write this out to excel
+#write.xlsx(slough.np.wet.direct.pairwise, file = "slough_np_wet_SEAB_prob_diff.xlsx")
+```
+
+#### Pond wet season
+```{r}
+slough.pond.wet.pairwise <- SEA.B.pairwise %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "SRS", Habitat == "Pond", Season == "Wet") %>% 
+  #unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>% 
+  select(-c(Slough, Habitat, Season)) %>% 
+  column_to_rownames(var = "SizeClass") %>% 
+  t() %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "TSL", Habitat == "Pond", Season == "Wet") %>% 
+  filter(SizeClass %in% colnames(.)) %>% 
+  select(Slough, Habitat, Season, SizeClass, matches(.$SizeClass)) %>% 
+  unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season", "SizeClass"), sep = "_") %>% 
+  column_to_rownames(var = "Slough_Habitat_Season_SizeClass")
+
+#format modes to bind with pairwise probs
+slough.pond.wet.modes.wide <- SEA.B.modes.matrix.t %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "Size Class"), sep = 3) %>% 
+  mutate(`Size Class` = gsub("^.", "", `Size Class`)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Season == "Wet", Habitat == "Pond") %>% 
+  pivot_wider(id_cols = `Size Class`, names_from = Slough, values_from = mode) %>% 
+  filter(!is.na(SRS), !is.na(TSL))
+
+slough.pond.wet.direct.pairwise <- slough.pond.wet.pairwise %>% as.matrix() %>% 
+  diag() %>% as.data.frame() %>% 
+  mutate(Slough_Habitat_Season_SizeClass = rownames(slough.pond.wet.pairwise)) %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season", "Size Class"), sep = "_") %>% 
+  filter(!`Size Class` %in% c("Green Algae", "FLOC", "PERMAT", "PEREPI")) %>% 
+  merge(., slough.pond.wet.modes.wide, by = "Size Class") %>% 
+  select(`Size Class`, contains("TSL"), contains("SRS"), everything()) %>% select(-c(Slough)) %>% 
+  rename(`TSL < SRS` = ".") %>% 
+  mutate(#`Pre > Post` = 1 - `Pre < Post`,
+    Direction = case_when(
+      `TSL < SRS` >= 0.95 ~ "Decrease",
+      `TSL < SRS` < 0.05 ~ "Increase",
+      `TSL < SRS` > 0.05 | `TSL < SRS` < 0.95 ~ "No Change"),
+    `Percent Change` = ((TSL-SRS)/SRS)*100,
+    `Size Class` = case_when(
+      `Size Class` == "CELSPP" ~ "Celithimus spp.",
+      `Size Class` == "PALPAL" ~ "P. paludosus",
+      `Size Class` == "PELFEM" ~ "P. femoratus",
+      `Size Class` == "PROFAL" ~ "P. fallax",
+      `Size Class` == "PROALL" ~ "P. alleni",
+      `Size Class` == "BRAGRA" ~ "B. gravida",
+      `Size Class` == "AMPHIPOD" ~ "Amphipoda",
+      `Size Class` == "COPEPOD" ~ "Copepoda",
+      TRUE ~ `Size Class`)) %>% 
+  mutate(across(where(is.numeric), round, digits = 2)) %>% 
+  select(Season, Habitat, `Size Class`, TSL, SRS, `TSL < SRS`, `Percent Change`)
+
+#write this out to excel
+#write.xlsx(slough.pond.wet.direct.pairwise, file = "slough_pond_wet_SEAB_prob_diff.xlsx")
+```
+
+#### Marsh dry season
+```{r}
+slough.marsh.dry.pairwise <- SEA.B.pairwise %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "SRS", Habitat == "Marsh", Season == "Dry") %>% 
+  #unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>% 
+  select(-c(Slough, Habitat, Season)) %>% 
+  column_to_rownames(var = "SizeClass") %>% 
+  t() %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "TSL", Habitat == "Marsh", Season == "Dry") %>% 
+  filter(SizeClass %in% colnames(.)) %>% 
+  select(Slough, Habitat, Season, SizeClass, matches(.$SizeClass)) %>% 
+  unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season", "SizeClass"), sep = "_") %>% 
+  column_to_rownames(var = "Slough_Habitat_Season_SizeClass")
+
+#format modes to bind with pairwise probs
+slough.marsh.dry.modes.wide <- SEA.B.modes.matrix.t %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "Size Class"), sep = 3) %>% 
+  mutate(`Size Class` = gsub("^.", "", `Size Class`)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Season == "Dry", Habitat == "Marsh") %>% 
+  pivot_wider(id_cols = `Size Class`, names_from = Slough, values_from = mode) %>% 
+  filter(!is.na(SRS), !is.na(TSL))
+
+slough.marsh.dry.direct.pairwise <- slough.marsh.dry.pairwise %>% as.matrix() %>% 
+  diag() %>% as.data.frame() %>% 
+  mutate(Slough_Habitat_Season_SizeClass = rownames(slough.marsh.dry.pairwise)) %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season", "Size Class"), sep = "_") %>% 
+  filter(!`Size Class` %in% c("Green Algae", "FLOC", "PERMAT", "PEREPI")) %>% 
+  merge(., slough.marsh.dry.modes.wide, by = "Size Class") %>% 
+  select(`Size Class`, contains("TSL"), contains("SRS"), everything()) %>% select(-c(Slough)) %>% 
+  rename(`TSL < SRS` = ".") %>% 
+  mutate(#`Pre > Post` = 1 - `Pre < Post`,
+    Direction = case_when(
+      `TSL < SRS` >= 0.95 ~ "Decrease",
+      `TSL < SRS` < 0.05 ~ "Increase",
+      `TSL < SRS` > 0.05 | `TSL < SRS` < 0.95 ~ "No Change"),
+    `Percent Change` = ((TSL-SRS)/SRS)*100,
+    `Size Class` = case_when(
+      `Size Class` == "AMPHIPOD" ~ "Amphipoda",
+      `Size Class` == "BELSPP" ~ "Belostoma spp.",
+      `Size Class` == "BRAGRA" ~ "B. gravida",
+      `Size Class` == "COPEPOD" ~ "Copepoda",
+      `Size Class` == "CHIRON" ~ "Chironomidae",
+      `Size Class` == "COENAG" ~ "Coenagrionidae",
+      `Size Class` == "CELSPP" ~ "Celithimus spp.",
+      `Size Class` == "ERYSIM" ~ "E. simplicicollis",
+      `Size Class` == "PALPAL" ~ "P. paludosus",
+      `Size Class` == "PELFEM" ~ "P. femoratus",
+      `Size Class` == "PROFAL" ~ "P. fallax",
+      `Size Class` == "PROALL" ~ "P. alleni",
+      TRUE ~ `Size Class`)) %>% 
+  mutate(across(where(is.numeric), round, digits = 2)) %>% 
+  select(Season, Habitat, `Size Class`, TSL, SRS, `TSL < SRS`, `Percent Change`)
+
+#write this out to excel
+#write.xlsx(slough.marsh.dry.direct.pairwise, file = "slough_marsh_dry_SEAB_prob_diff.xlsx")
+```
+
+#### Near pond dry season
+No comparisons possible because of TSL near ponds drying early
+
+#### Pond dry season
+```{r}
+slough.pond.dry.pairwise <- SEA.B.pairwise %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "SRS", Habitat == "Pond", Season == "Dry") %>% 
+  #unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>% 
+  select(-c(Slough, Habitat, Season)) %>% 
+  column_to_rownames(var = "SizeClass") %>% 
+  t() %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "TSL", Habitat == "Pond", Season == "Dry") %>% 
+  filter(SizeClass %in% colnames(.)) %>% 
+  select(Slough, Habitat, Season, SizeClass, matches(.$SizeClass)) %>% 
+  unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season", "SizeClass"), sep = "_") %>% 
+  column_to_rownames(var = "Slough_Habitat_Season_SizeClass")
+
+#format modes to bind with pairwise probs
+slough.pond.dry.modes.wide <- SEA.B.modes.matrix.t %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "Size Class"), sep = 3) %>% 
+  mutate(`Size Class` = gsub("^.", "", `Size Class`)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Season == "Dry", Habitat == "Pond") %>% 
+  pivot_wider(id_cols = `Size Class`, names_from = Slough, values_from = mode) %>% 
+  filter(!is.na(SRS), !is.na(TSL))
+
+slough.pond.dry.direct.pairwise <- slough.pond.dry.pairwise %>% as.matrix() %>% 
+  diag() %>% as.data.frame() %>% 
+  mutate(Slough_Habitat_Season_SizeClass = rownames(slough.pond.dry.pairwise)) %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season", "Size Class"), sep = "_") %>% 
+  filter(!`Size Class` %in% c("Green Algae", "FLOC", "PERMAT", "PEREPI")) %>% 
+  merge(., slough.pond.dry.modes.wide, by = "Size Class") %>% 
+  select(`Size Class`, contains("TSL"), contains("SRS"), everything()) %>% select(-c(Slough)) %>% 
+  rename(`TSL < SRS` = ".") %>% 
+  mutate(#`Pre > Post` = 1 - `Pre < Post`,
+    Direction = case_when(
+      `TSL < SRS` >= 0.95 ~ "Decrease",
+      `TSL < SRS` < 0.05 ~ "Increase",
+      `TSL < SRS` > 0.05 | `TSL < SRS` < 0.95 ~ "No Change"),
+    `Percent Change` = ((TSL-SRS)/SRS)*100,
+    `Size Class` = case_when(
+      `Size Class` == "AMPHIPOD" ~ "Amphipoda",
+      `Size Class` == "BELSPP" ~ "Belostoma spp.",
+      `Size Class` == "BRAGRA" ~ "B. gravida",
+      `Size Class` == "COPEPOD" ~ "Copepoda",
+      `Size Class` == "CHIRON" ~ "Chironomidae",
+      `Size Class` == "COENAG" ~ "Coenagrionidae",
+      `Size Class` == "CELSPP" ~ "Celithimus spp.",
+      `Size Class` == "ERYSIM" ~ "E. simplicicollis",
+      `Size Class` == "PALPAL" ~ "P. paludosus",
+      `Size Class` == "PELFEM" ~ "P. femoratus",
+      `Size Class` == "PROFAL" ~ "P. fallax",
+      `Size Class` == "PROALL" ~ "P. alleni",
+      TRUE ~ `Size Class`)) %>% 
+  mutate(across(where(is.numeric), round, digits = 2)) %>% 
+  select(Season, Habitat, `Size Class`, TSL, SRS, `TSL < SRS`, `Percent Change`)
+
+#write this out to excel
+#write.xlsx(slough.pond.dry.direct.pairwise, file = "slough_pond_dry_SEAB_prob_diff.xlsx")
+```
+
+#### Combine slough comparisons
+```{r}
+slough.pairwise <-
+  bind_rows(
+    slough.marsh.dry.direct.pairwise,
+    slough.pond.dry.direct.pairwise,
+    slough.marsh.wet.direct.pairwise,
+    slough.np.wet.direct.pairwise,
+    slough.pond.wet.direct.pairwise
+  )
+
+write.csv(slough.pairwise, 
+          "Outputs/Stable Isotopes/Trophic Niche/Post-Invasion/slough_pairwise.csv",
+          row.names = F)
+
+#proportion of statistical changes in slough comparisons
+sum(slough.pairwise$`TSL < SRS`>=0.95 | slough.pairwise$`TSL < SRS`<=0.05)/nrow(slough.pairwise) 
+
+slough.pairwise %>% 
+  filter(`TSL < SRS` >= 0.95 | `TSL < SRS` <= 0.05) %>% 
+  mutate(`Percent Change` = abs(`Percent Change`)) %>% 
+  summarize_at(.vars = "Percent Change", list(mean = mean, sd = sd))
+```
+
+### Habitat Comparisons
+#### SRS wet marsh vs near pond 
+```{r}
+srs.wet.marsh.np.pairwise <- SEA.B.pairwise %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "SRS", Habitat == "Marsh", Season == "Wet") %>% 
+  #unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>% 
+  select(-c(Slough, Habitat, Season)) %>% 
+  column_to_rownames(var = "SizeClass") %>% 
+  t() %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "SRS", Habitat == "NP", Season == "Wet") %>% 
+  filter(SizeClass %in% colnames(.)) %>% 
+  select(Slough, Habitat, Season, SizeClass, matches(.$SizeClass)) %>% 
+  unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season", "SizeClass"), sep = "_") %>% 
+  column_to_rownames(var = "Slough_Habitat_Season_SizeClass")
+
+#format modes to bind with pairwise probs
+srs.wet.marsh.np.modes.wide <- SEA.B.modes.matrix.t %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "Size Class"), sep = 3) %>% 
+  mutate(`Size Class` = gsub("^.", "", `Size Class`)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "SRS", Habitat %in%  c("Marsh", "NP"), Season == "Wet") %>% 
+  pivot_wider(id_cols = `Size Class`, names_from = Habitat, values_from = mode) %>% 
+  filter(!is.na(Marsh), !is.na(NP))
+
+srs.wet.marsh.np.direct.pairwise <- srs.wet.marsh.np.pairwise %>% as.matrix() %>% 
+  diag() %>% as.data.frame() %>% 
+  mutate(Slough_Habitat_Season_SizeClass = rownames(srs.wet.marsh.np.pairwise)) %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season", "Size Class"), sep = "_") %>% 
+  filter(!`Size Class` %in% c("Green Algae", "FLOC", "PERMAT", "PEREPI")) %>% 
+  merge(., srs.wet.marsh.np.modes.wide, by = "Size Class") %>% 
+  select(`Size Class`, contains("Marsh"), contains("NP"), everything()) %>% select(-c(Habitat)) %>% 
+  rename(`Marsh < NP` = ".") %>% 
+  mutate(#`Pre > Post` = 1 - `Pre < Post`,
+    Direction = case_when(
+      `Marsh < NP` >= 0.95 ~ "Decrease",
+      `Marsh < NP` < 0.05 ~ "Increase",
+      `Marsh < NP` > 0.05 | `Marsh < NP` < 0.95 ~ "No Change"),
+    `Percent Change` = ((NP-Marsh)/Marsh)*100,
+    `Size Class` = case_when(
+      `Size Class` == "AMPHIPOD" ~ "Amphipoda",
+      `Size Class` == "BELSPP" ~ "Belostoma spp.",
+      `Size Class` == "BRAGRA" ~ "B. gravida",
+      `Size Class` == "COPEPOD" ~ "Copepoda",
+      `Size Class` == "CHIRON" ~ "Chironomidae",
+      `Size Class` == "COENAG" ~ "Coenagrionidae",
+      `Size Class` == "CELSPP" ~ "Celithimus spp.",
+      `Size Class` == "ERYSIM" ~ "E. simplicicollis",
+      `Size Class` == "PALPAL" ~ "P. paludosus",
+      `Size Class` == "PELFEM" ~ "P. femoratus",
+      `Size Class` == "PROFAL" ~ "P. fallax",
+      `Size Class` == "PROALL" ~ "P. alleni",
+      `Size Class` == "PROSPP" ~ "Procambarus spp.",
+      TRUE ~ `Size Class`)) %>% 
+  mutate(across(where(is.numeric), round, digits = 2)) %>% 
+  select(Slough, Season, `Size Class`, Marsh, NP, `Marsh < NP`, `Percent Change`)
+
+#write this out to excel
+#write.xlsx(srs.wet.marsh.np.direct.pairwise, file = "srs_wet_marsh_np_SEAB_prob_diff.xlsx")
+```
+
+#### SRS wet marsh vs pond
+```{r}
+srs.wet.marsh.pond.pairwise <- SEA.B.pairwise %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "SRS", Habitat == "Marsh", Season == "Wet") %>% 
+  #unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>% 
+  select(-c(Slough, Habitat, Season)) %>% 
+  column_to_rownames(var = "SizeClass") %>% 
+  t() %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "SRS", Habitat == "Pond", Season == "Wet") %>% 
+  filter(SizeClass %in% colnames(.)) %>% 
+  select(Slough, Habitat, Season, SizeClass, matches(.$SizeClass)) %>% 
+  unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season", "SizeClass"), sep = "_") %>% 
+  column_to_rownames(var = "Slough_Habitat_Season_SizeClass")
+
+#format modes to bind with pairwise probs
+srs.wet.marsh.pond.modes.wide <- SEA.B.modes.matrix.t %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "Size Class"), sep = 3) %>% 
+  mutate(`Size Class` = gsub("^.", "", `Size Class`)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "SRS", Habitat %in%  c("Marsh", "Pond"), Season == "Wet") %>% 
+  pivot_wider(id_cols = `Size Class`, names_from = Habitat, values_from = mode) %>% 
+  filter(!is.na(Marsh), !is.na(Pond))
+
+srs.wet.marsh.pond.direct.pairwise <- srs.wet.marsh.pond.pairwise %>% as.matrix() %>% 
+  diag() %>% as.data.frame() %>% 
+  mutate(Slough_Habitat_Season_SizeClass = rownames(srs.wet.marsh.pond.pairwise)) %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season", "Size Class"), sep = "_") %>% 
+  filter(!`Size Class` %in% c("Green Algae", "FLOC", "PERMAT", "PEREPI")) %>% 
+  merge(., srs.wet.marsh.pond.modes.wide, by = "Size Class") %>% 
+  select(`Size Class`, contains("Marsh"), contains("Pond"), everything()) %>% select(-c(Habitat)) %>% 
+  rename(`Marsh < Pond` = ".") %>% 
+  mutate(#`Pre > Post` = 1 - `Pre < Post`,
+    Direction = case_when(
+      `Marsh < Pond` >= 0.95 ~ "Decrease",
+      `Marsh < Pond` < 0.05 ~ "Increase",
+      `Marsh < Pond` > 0.05 | `Marsh < Pond` < 0.95 ~ "No Change"),
+    `Percent Change` = ((Pond-Marsh)/Marsh)*100,
+    `Size Class` = case_when(
+      `Size Class` == "AMPHIPOD" ~ "Amphipoda",
+      `Size Class` == "BELSPP" ~ "Belostoma spp.",
+      `Size Class` == "BRAGRA" ~ "B. gravida",
+      `Size Class` == "COPEPOD" ~ "Copepoda",
+      `Size Class` == "CHIRON" ~ "Chironomidae",
+      `Size Class` == "COENAG" ~ "Coenagrionidae",
+      `Size Class` == "CELSPP" ~ "Celithimus spp.",
+      `Size Class` == "ERYSIM" ~ "E. simplicicollis",
+      `Size Class` == "LIBINC" ~ "L. incesta",
+      `Size Class` == "PALPAL" ~ "P. paludosus",
+      `Size Class` == "PELFEM" ~ "P. femoratus",
+      `Size Class` == "PROFAL" ~ "P. fallax",
+      `Size Class` == "PROALL" ~ "P. alleni",
+      `Size Class` == "PROSPP" ~ "Procambarus spp.",
+      TRUE ~ `Size Class`)) %>% 
+  mutate(across(where(is.numeric), round, digits = 2)) %>% 
+  select(Slough, Season, `Size Class`, Marsh, Pond, `Marsh < Pond`, `Percent Change`)
+
+#write this out to excel
+#write.xlsx(srs.wet.marsh.pond.direct.pairwise, file = "srs_wet_marsh_pond_SEAB_prob_diff.xlsx")
+```
+
+#### SRS wet near pond vs pond
+```{r}
+srs.wet.np.pond.pairwise <- SEA.B.pairwise %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "SRS", Habitat == "NP", Season == "Wet") %>% 
+  #unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>% 
+  select(-c(Slough, Habitat, Season)) %>% 
+  column_to_rownames(var = "SizeClass") %>% 
+  t() %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "SRS", Habitat == "Pond", Season == "Wet") %>% 
+  filter(SizeClass %in% colnames(.)) %>% 
+  select(Slough, Habitat, Season, SizeClass, matches(.$SizeClass)) %>% 
+  unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season", "SizeClass"), sep = "_") %>% 
+  column_to_rownames(var = "Slough_Habitat_Season_SizeClass")
+
+#format modes to bind with pairwise probs
+srs.wet.np.pond.modes.wide <- SEA.B.modes.matrix.t %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "Size Class"), sep = 3) %>% 
+  mutate(`Size Class` = gsub("^.", "", `Size Class`)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "SRS", Habitat %in%  c("NP", "Pond"), Season == "Wet") %>% 
+  pivot_wider(id_cols = `Size Class`, names_from = Habitat, values_from = mode) %>% 
+  filter(!is.na(NP), !is.na(Pond))
+
+srs.wet.np.pond.direct.pairwise <- srs.wet.np.pond.pairwise %>% as.matrix() %>% 
+  diag() %>% as.data.frame() %>% 
+  mutate(Slough_Habitat_Season_SizeClass = rownames(srs.wet.np.pond.pairwise)) %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season", "Size Class"), sep = "_") %>% 
+  filter(!`Size Class` %in% c("Green Algae", "FLOC", "PERMAT", "PEREPI")) %>% 
+  merge(., srs.wet.np.pond.modes.wide, by = "Size Class") %>% 
+  select(`Size Class`, contains("NP"), contains("Pond"), everything()) %>% select(-c(Habitat)) %>% 
+  rename(`NP < Pond` = ".") %>% 
+  mutate(#`Pre > Post` = 1 - `Pre < Post`,
+    Direction = case_when(
+      `NP < Pond` >= 0.95 ~ "Decrease",
+      `NP < Pond` < 0.05 ~ "Increase",
+      `NP < Pond` > 0.05 | `NP < Pond` < 0.95 ~ "No Change"),
+    `Percent Change` = ((Pond-NP)/NP)*100,
+    `Size Class` = case_when(
+      `Size Class` == "AMPHIPOD" ~ "Amphipoda",
+      `Size Class` == "BELSPP" ~ "Belostoma spp.",
+      `Size Class` == "BRAGRA" ~ "B. gravida",
+      `Size Class` == "COPEPOD" ~ "Copepoda",
+      `Size Class` == "CHIRON" ~ "Chironomidae",
+      `Size Class` == "COENAG" ~ "Coenagrionidae",
+      `Size Class` == "CELSPP" ~ "Celithimus spp.",
+      `Size Class` == "ERYSIM" ~ "E. simplicicollis",
+      `Size Class` == "LIBINC" ~ "L. incesta",
+      `Size Class` == "PALPAL" ~ "P. paludosus",
+      `Size Class` == "PELFEM" ~ "P. femoratus",
+      `Size Class` == "PROFAL" ~ "P. fallax",
+      `Size Class` == "PROALL" ~ "P. alleni",
+      `Size Class` == "PROSPP" ~ "Procambarus spp.",
+      TRUE ~ `Size Class`)) %>% 
+  mutate(across(where(is.numeric), round, digits = 2)) %>% 
+  select(Slough, Season, `Size Class`, NP, Pond, `NP < Pond`, `Percent Change`)
+
+#write this out to excel
+#write.xlsx(srs.wet.np.pond.direct.pairwise, file = "srs_wet_np_pond_SEAB_prob_diff.xlsx")
+```
+
+#### SRS dry marsh vs near pond
+```{r}
+srs.dry.marsh.np.pairwise <- SEA.B.pairwise %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "SRS", Habitat == "Marsh", Season == "Dry") %>% 
+  #unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>% 
+  select(-c(Slough, Habitat, Season)) %>% 
+  column_to_rownames(var = "SizeClass") %>% 
+  t() %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "SRS", Habitat == "NP", Season == "Dry") %>% 
+  filter(SizeClass %in% colnames(.)) %>% 
+  select(Slough, Habitat, Season, SizeClass, matches(.$SizeClass)) %>% 
+  unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season", "SizeClass"), sep = "_") %>% 
+  column_to_rownames(var = "Slough_Habitat_Season_SizeClass")
+
+#format modes to bind with pairwise probs
+srs.dry.marsh.np.modes.wide <- SEA.B.modes.matrix.t %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "Size Class"), sep = 3) %>% 
+  mutate(`Size Class` = gsub("^.", "", `Size Class`)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "SRS", Habitat %in%  c("Marsh", "NP"), Season == "Dry") %>% 
+  pivot_wider(id_cols = `Size Class`, names_from = Habitat, values_from = mode) %>% 
+  filter(!is.na(Marsh), !is.na(NP))
+
+srs.dry.marsh.np.direct.pairwise <- srs.dry.marsh.np.pairwise %>% as.matrix() %>% 
+  diag() %>% as.data.frame() %>% 
+  mutate(Slough_Habitat_Season_SizeClass = rownames(srs.dry.marsh.np.pairwise)) %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season", "Size Class"), sep = "_") %>% 
+  filter(!`Size Class` %in% c("Green Algae", "FLOC", "PERMAT", "PEREPI")) %>% 
+  merge(., srs.dry.marsh.np.modes.wide, by = "Size Class") %>% 
+  select(`Size Class`, contains("Marsh"), contains("NP"), everything()) %>% select(-c(Habitat)) %>% 
+  rename(`Marsh < NP` = ".") %>% 
+  mutate(#`Pre > Post` = 1 - `Pre < Post`,
+    Direction = case_when(
+      `Marsh < NP` >= 0.95 ~ "Decrease",
+      `Marsh < NP` < 0.05 ~ "Increase",
+      `Marsh < NP` > 0.05 | `Marsh < NP` < 0.95 ~ "No Change"),
+    `Percent Change` = ((NP-Marsh)/Marsh)*100,
+    `Size Class` = case_when(
+      `Size Class` == "AMPHIPOD" ~ "Amphipoda",
+      `Size Class` == "BELSPP" ~ "Belostoma spp.",
+      `Size Class` == "BRAGRA" ~ "B. gravida",
+      `Size Class` == "COPEPOD" ~ "Copepoda",
+      `Size Class` == "CHIRON" ~ "Chironomidae",
+      `Size Class` == "COENAG" ~ "Coenagrionidae",
+      `Size Class` == "CELSPP" ~ "Celithimus spp.",
+      `Size Class` == "ERYSIM" ~ "E. simplicicollis",
+      `Size Class` == "PALPAL" ~ "P. paludosus",
+      `Size Class` == "PELFEM" ~ "P. femoratus",
+      `Size Class` == "PROFAL" ~ "P. fallax",
+      `Size Class` == "PROALL" ~ "P. alleni",
+      `Size Class` == "PROSPP" ~ "Procambarus spp.",
+      TRUE ~ `Size Class`)) %>% 
+  mutate(across(where(is.numeric), round, digits = 2)) %>% 
+  select(Slough, Season, `Size Class`, Marsh, NP, `Marsh < NP`, `Percent Change`)
+
+#write this out to excel
+#write.xlsx(srs.dry.marsh.np.direct.pairwise, file = "srs_dry_marsh_np_SEAB_prob_diff.xlsx")
+```
+
+#### SRS dry marsh vs pond
+```{r}
+srs.dry.marsh.pond.pairwise <- SEA.B.pairwise %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "SRS", Habitat == "Marsh", Season == "Dry") %>% 
+  #unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>% 
+  select(-c(Slough, Habitat, Season)) %>% 
+  column_to_rownames(var = "SizeClass") %>% 
+  t() %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "SRS", Habitat == "Pond", Season == "Dry") %>% 
+  filter(SizeClass %in% colnames(.)) %>% 
+  select(Slough, Habitat, Season, SizeClass, matches(.$SizeClass)) %>% 
+  unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season", "SizeClass"), sep = "_") %>% 
+  column_to_rownames(var = "Slough_Habitat_Season_SizeClass")
+
+#format modes to bind with pairwise probs
+srs.dry.marsh.pond.modes.wide <- SEA.B.modes.matrix.t %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "Size Class"), sep = 3) %>% 
+  mutate(`Size Class` = gsub("^.", "", `Size Class`)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "SRS", Habitat %in%  c("Marsh", "Pond"), Season == "Dry") %>% 
+  pivot_wider(id_cols = `Size Class`, names_from = Habitat, values_from = mode) %>% 
+  filter(!is.na(Marsh), !is.na(Pond))
+
+srs.dry.marsh.pond.direct.pairwise <- srs.dry.marsh.pond.pairwise %>% as.matrix() %>% 
+  diag() %>% as.data.frame() %>% 
+  mutate(Slough_Habitat_Season_SizeClass = rownames(srs.dry.marsh.pond.pairwise)) %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season", "Size Class"), sep = "_") %>% 
+  filter(!`Size Class` %in% c("Green Algae", "FLOC", "PERMAT", "PEREPI")) %>% 
+  merge(., srs.dry.marsh.pond.modes.wide, by = "Size Class") %>% 
+  select(`Size Class`, contains("Marsh"), contains("Pond"), everything()) %>% select(-c(Habitat)) %>% 
+  rename(`Marsh < Pond` = ".") %>% 
+  mutate(#`Pre > Post` = 1 - `Pre < Post`,
+    Direction = case_when(
+      `Marsh < Pond` >= 0.95 ~ "Decrease",
+      `Marsh < Pond` < 0.05 ~ "Increase",
+      `Marsh < Pond` > 0.05 | `Marsh < Pond` < 0.95 ~ "No Change"),
+    `Percent Change` = ((Pond-Marsh)/Marsh)*100,
+    `Size Class` = case_when(
+      `Size Class` == "AMPHIPOD" ~ "Amphipoda",
+      `Size Class` == "BELSPP" ~ "Belostoma spp.",
+      `Size Class` == "BRAGRA" ~ "B. gravida",
+      `Size Class` == "COPEPOD" ~ "Copepoda",
+      `Size Class` == "CHIRON" ~ "Chironomidae",
+      `Size Class` == "COENAG" ~ "Coenagrionidae",
+      `Size Class` == "CELSPP" ~ "Celithimus spp.",
+      `Size Class` == "ERYSIM" ~ "E. simplicicollis",
+      `Size Class` == "LIBINC" ~ "L. incesta",
+      `Size Class` == "PALPAL" ~ "P. paludosus",
+      `Size Class` == "PELFEM" ~ "P. femoratus",
+      `Size Class` == "PLASCA" ~ "Planorbella spp.",
+      `Size Class` == "PROFAL" ~ "P. fallax",
+      `Size Class` == "PROALL" ~ "P. alleni",
+      `Size Class` == "PROSPP" ~ "Procambarus spp.",
+      TRUE ~ `Size Class`)) %>% 
+  mutate(across(where(is.numeric), round, digits = 2)) %>% 
+  select(Slough, Season, `Size Class`, Marsh, Pond, `Marsh < Pond`, `Percent Change`)
+
+#write this out to excel
+#write.xlsx(srs.dry.marsh.pond.direct.pairwise, file = "srs_dry_marsh_pond_SEAB_prob_diff.xlsx")
+```
+
+#### SRS dry near pond vs pond
+```{r}
+srs.dry.np.pond.pairwise <- SEA.B.pairwise %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "SRS", Habitat == "NP", Season == "Dry") %>% 
+  #unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>% 
+  select(-c(Slough, Habitat, Season)) %>% 
+  column_to_rownames(var = "SizeClass") %>% 
+  t() %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "SRS", Habitat == "Pond", Season == "Dry") %>% 
+  filter(SizeClass %in% colnames(.)) %>% 
+  select(Slough, Habitat, Season, SizeClass, matches(.$SizeClass)) %>% 
+  unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season", "SizeClass"), sep = "_") %>% 
+  column_to_rownames(var = "Slough_Habitat_Season_SizeClass")
+
+#format modes to bind with pairwise probs
+srs.dry.np.pond.modes.wide <- SEA.B.modes.matrix.t %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "Size Class"), sep = 3) %>% 
+  mutate(`Size Class` = gsub("^.", "", `Size Class`)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "SRS", Habitat %in%  c("NP", "Pond"), Season == "Dry") %>% 
+  pivot_wider(id_cols = `Size Class`, names_from = Habitat, values_from = mode) %>% 
+  filter(!is.na(NP), !is.na(Pond))
+
+srs.dry.np.pond.direct.pairwise <- srs.dry.np.pond.pairwise %>% as.matrix() %>% 
+  diag() %>% as.data.frame() %>% 
+  mutate(Slough_Habitat_Season_SizeClass = rownames(srs.dry.np.pond.pairwise)) %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season", "Size Class"), sep = "_") %>% 
+  filter(!`Size Class` %in% c("Green Algae", "FLOC", "PERMAT", "PEREPI")) %>% 
+  merge(., srs.dry.np.pond.modes.wide, by = "Size Class") %>% 
+  select(`Size Class`, contains("NP"), contains("Pond"), everything()) %>% select(-c(Habitat)) %>% 
+  rename(`NP < Pond` = ".") %>% 
+  mutate(#`Pre > Post` = 1 - `Pre < Post`,
+    Direction = case_when(
+      `NP < Pond` >= 0.95 ~ "Decrease",
+      `NP < Pond` < 0.05 ~ "Increase",
+      `NP < Pond` > 0.05 | `NP < Pond` < 0.95 ~ "No Change"),
+    `Percent Change` = ((Pond-NP)/NP)*100,
+    `Size Class` = case_when(
+      `Size Class` == "AMPHIPOD" ~ "Amphipoda",
+      `Size Class` == "BELSPP" ~ "Belostoma spp.",
+      `Size Class` == "BRAGRA" ~ "B. gravida",
+      `Size Class` == "COPEPOD" ~ "Copepoda",
+      `Size Class` == "CHIRON" ~ "Chironomidae",
+      `Size Class` == "COENAG" ~ "Coenagrionidae",
+      `Size Class` == "CELSPP" ~ "Celithimus spp.",
+      `Size Class` == "ERYSIM" ~ "E. simplicicollis",
+      `Size Class` == "LIBINC" ~ "L. incesta",
+      `Size Class` == "PALPAL" ~ "P. paludosus",
+      `Size Class` == "PELFEM" ~ "P. femoratus",
+      `Size Class` == "PROFAL" ~ "P. fallax",
+      `Size Class` == "PROALL" ~ "P. alleni",
+      `Size Class` == "PROSPP" ~ "Procambarus spp.",
+      TRUE ~ `Size Class`)) %>% 
+  mutate(across(where(is.numeric), round, digits = 2)) %>% 
+  select(Slough, Season, `Size Class`, NP, Pond, `NP < Pond`, `Percent Change`)
+
+#write this out to excel
+#write.xlsx(srs.dry.np.pond.direct.pairwise, file = "srs_dry_np_pond_SEAB_prob_diff.xlsx")
+```
+
+#### TSL wet marsh vs near pond
+```{r}
+tsl.wet.marsh.np.pairwise <- SEA.B.pairwise %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "TSL", Habitat == "Marsh", Season == "Wet") %>% 
+  #unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>% 
+  select(-c(Slough, Habitat, Season)) %>% 
+  column_to_rownames(var = "SizeClass") %>% 
+  t() %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "TSL", Habitat == "NP", Season == "Wet") %>% 
+  filter(SizeClass %in% colnames(.)) %>% 
+  select(Slough, Habitat, Season, SizeClass, matches(.$SizeClass)) %>% 
+  unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season", "SizeClass"), sep = "_") %>% 
+  column_to_rownames(var = "Slough_Habitat_Season_SizeClass")
+
+#format modes to bind with pairwise probs
+tsl.wet.marsh.np.modes.wide <- SEA.B.modes.matrix.t %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "Size Class"), sep = 3) %>% 
+  mutate(`Size Class` = gsub("^.", "", `Size Class`)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "TSL", Habitat %in%  c("Marsh", "NP"), Season == "Wet") %>% 
+  pivot_wider(id_cols = `Size Class`, names_from = Habitat, values_from = mode) %>% 
+  filter(!is.na(Marsh), !is.na(NP))
+
+tsl.wet.marsh.np.direct.pairwise <- tsl.wet.marsh.np.pairwise %>% as.matrix() %>% 
+  diag() %>% as.data.frame() %>% 
+  mutate(Slough_Habitat_Season_SizeClass = rownames(tsl.wet.marsh.np.pairwise)) %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season", "Size Class"), sep = "_") %>% 
+  filter(!`Size Class` %in% c("Green Algae", "FLOC", "PERMAT", "PEREPI")) %>% 
+  merge(., tsl.wet.marsh.np.modes.wide, by = "Size Class") %>% 
+  select(`Size Class`, contains("Marsh"), contains("NP"), everything()) %>% select(-c(Habitat)) %>% 
+  rename(`Marsh < NP` = ".") %>% 
+  mutate(#`Pre > Post` = 1 - `Pre < Post`,
+    Direction = case_when(
+      `Marsh < NP` >= 0.95 ~ "Decrease",
+      `Marsh < NP` < 0.05 ~ "Increase",
+      `Marsh < NP` > 0.05 | `Marsh < NP` < 0.95 ~ "No Change"),
+    `Percent Change` = ((NP-Marsh)/Marsh)*100,
+    `Size Class` = case_when(
+      `Size Class` == "AMPHIPOD" ~ "Amphipoda",
+      `Size Class` == "BELSPP" ~ "Belostoma spp.",
+      `Size Class` == "BLUE MITE" ~ "Hydrachnidia",
+      `Size Class` == "BRAGRA" ~ "B. gravida",
+      `Size Class` == "COLEOA" ~ "Coleoptera",
+      `Size Class` == "COPEPOD" ~ "Copepoda",
+      `Size Class` == "CHIRON" ~ "Chironomidae",
+      `Size Class` == "COENAG" ~ "Coenagrionidae",
+      `Size Class` == "CELSPP" ~ "Celithimus spp.",
+      `Size Class` == "ERYSIM" ~ "E. simplicicollis",
+      `Size Class` == "GERRID" ~ "Gerridae",
+      `Size Class` == "PALPAL" ~ "P. paludosus",
+      `Size Class` == "PELFEM" ~ "P. femoratus",
+      `Size Class` == "PLASCA" ~ "Planorbella spp.",
+      `Size Class` == "PROFAL" ~ "P. fallax",
+      `Size Class` == "PROALL" ~ "P. alleni",
+      `Size Class` == "PROSPP" ~ "Procambarus spp.",
+      TRUE ~ `Size Class`)) %>% 
+  mutate(across(where(is.numeric), round, digits = 2)) %>% 
+  select(Slough, Season, `Size Class`, Marsh, NP, `Marsh < NP`, `Percent Change`)
+
+#write this out to excel
+#write.xlsx(tsl.wet.marsh.np.direct.pairwise, file = "tsl_wet_marsh_np_SEAB_prob_diff.xlsx")
+```
+
+#### TSL wet marsh vs pond
+```{r}
+tsl.wet.marsh.pond.pairwise <- SEA.B.pairwise %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "TSL", Habitat == "Marsh", Season == "Wet") %>% 
+  #unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>% 
+  select(-c(Slough, Habitat, Season)) %>% 
+  column_to_rownames(var = "SizeClass") %>% 
+  t() %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "TSL", Habitat == "Pond", Season == "Wet") %>% 
+  filter(SizeClass %in% colnames(.)) %>% 
+  select(Slough, Habitat, Season, SizeClass, matches(.$SizeClass)) %>% 
+  unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season", "SizeClass"), sep = "_") %>% 
+  column_to_rownames(var = "Slough_Habitat_Season_SizeClass")
+
+#format modes to bind with pairwise probs
+tsl.wet.marsh.pond.modes.wide <- SEA.B.modes.matrix.t %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "Size Class"), sep = 3) %>% 
+  mutate(`Size Class` = gsub("^.", "", `Size Class`)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "TSL", Habitat %in%  c("Marsh", "Pond"), Season == "Wet") %>% 
+  pivot_wider(id_cols = `Size Class`, names_from = Habitat, values_from = mode) %>% 
+  filter(!is.na(Marsh), !is.na(Pond))
+
+tsl.wet.marsh.pond.direct.pairwise <- tsl.wet.marsh.pond.pairwise %>% as.matrix() %>% 
+  diag() %>% as.data.frame() %>% 
+  mutate(Slough_Habitat_Season_SizeClass = rownames(tsl.wet.marsh.pond.pairwise)) %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season", "Size Class"), sep = "_") %>% 
+  filter(!`Size Class` %in% c("Green Algae", "FLOC", "PERMAT", "PEREPI")) %>% 
+  merge(., tsl.wet.marsh.pond.modes.wide, by = "Size Class") %>% 
+  select(`Size Class`, contains("Marsh"), contains("Pond"), everything()) %>% select(-c(Habitat)) %>% 
+  rename(`Marsh < Pond` = ".") %>% 
+  mutate(#`Pre > Post` = 1 - `Pre < Post`,
+    Direction = case_when(
+      `Marsh < Pond` >= 0.95 ~ "Decrease",
+      `Marsh < Pond` < 0.05 ~ "Increase",
+      `Marsh < Pond` > 0.05 | `Marsh < Pond` < 0.95 ~ "No Change"),
+    `Percent Change` = ((Pond-Marsh)/Marsh)*100,
+    `Size Class` = case_when(
+      `Size Class` == "AMPHIPOD" ~ "Amphipoda",
+      `Size Class` == "BELSPP" ~ "Belostoma spp.",
+      `Size Class` == "BRAGRA" ~ "B. gravida",
+      `Size Class` == "COPEPOD" ~ "Copepoda",
+      `Size Class` == "CHIRON" ~ "Chironomidae",
+      `Size Class` == "COENAG" ~ "Coenagrionidae",
+      `Size Class` == "CELSPP" ~ "Celithimus spp.",
+      `Size Class` == "ERYSIM" ~ "E. simplicicollis",
+      `Size Class` == "LIBINC" ~ "L. incesta",
+      `Size Class` == "PALPAL" ~ "P. paludosus",
+      `Size Class` == "PELFEM" ~ "P. femoratus",
+      `Size Class` == "PROFAL" ~ "P. fallax",
+      `Size Class` == "PROALL" ~ "P. alleni",
+      `Size Class` == "PROSPP" ~ "Procambarus spp.",
+      TRUE ~ `Size Class`)) %>% 
+  mutate(across(where(is.numeric), round, digits = 2)) %>% 
+  select(Slough, Season, `Size Class`, Marsh, Pond, `Marsh < Pond`, `Percent Change`)
+
+#write this out to excel
+#write.xlsx(tsl.wet.marsh.pond.direct.pairwise, file = "tsl_wet_marsh_pond_SEAB_prob_diff.xlsx")
+```
+
+#### TSL wet near pond vs pond
+```{r}
+tsl.wet.np.pond.pairwise <- SEA.B.pairwise %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "TSL", Habitat == "NP", Season == "Wet") %>% 
+  #unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>% 
+  select(-c(Slough, Habitat, Season)) %>% 
+  column_to_rownames(var = "SizeClass") %>% 
+  t() %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "TSL", Habitat == "Pond", Season == "Wet") %>% 
+  filter(SizeClass %in% colnames(.)) %>% 
+  select(Slough, Habitat, Season, SizeClass, matches(.$SizeClass)) %>% 
+  unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season", "SizeClass"), sep = "_") %>% 
+  column_to_rownames(var = "Slough_Habitat_Season_SizeClass")
+
+#format modes to bind with pairwise probs
+tsl.wet.np.pond.modes.wide <- SEA.B.modes.matrix.t %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "Size Class"), sep = 3) %>% 
+  mutate(`Size Class` = gsub("^.", "", `Size Class`)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "TSL", Habitat %in%  c("NP", "Pond"), Season == "Wet") %>% 
+  pivot_wider(id_cols = `Size Class`, names_from = Habitat, values_from = mode) %>% 
+  filter(!is.na(NP), !is.na(Pond))
+
+tsl.wet.np.pond.direct.pairwise <- tsl.wet.np.pond.pairwise %>% as.matrix() %>% 
+  diag() %>% as.data.frame() %>% 
+  mutate(Slough_Habitat_Season_SizeClass = rownames(tsl.wet.np.pond.pairwise)) %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season", "Size Class"), sep = "_") %>% 
+  filter(!`Size Class` %in% c("Green Algae", "FLOC", "PERMAT", "PEREPI")) %>% 
+  merge(., tsl.wet.np.pond.modes.wide, by = "Size Class") %>% 
+  select(`Size Class`, contains("NP"), contains("Pond"), everything()) %>% select(-c(Habitat)) %>% 
+  rename(`NP < Pond` = ".") %>% 
+  mutate(#`Pre > Post` = 1 - `Pre < Post`,
+    Direction = case_when(
+      `NP < Pond` >= 0.95 ~ "Decrease",
+      `NP < Pond` < 0.05 ~ "Increase",
+      `NP < Pond` > 0.05 | `NP < Pond` < 0.95 ~ "No Change"),
+    `Percent Change` = ((Pond-NP)/NP)*100,
+    `Size Class` = case_when(
+      `Size Class` == "AMPHIPOD" ~ "Amphipoda",
+      `Size Class` == "BELSPP" ~ "Belostoma spp.",
+      `Size Class` == "BRAGRA" ~ "B. gravida",
+      `Size Class` == "COPEPOD" ~ "Copepoda",
+      `Size Class` == "CHIRON" ~ "Chironomidae",
+      `Size Class` == "COENAG" ~ "Coenagrionidae",
+      `Size Class` == "CELSPP" ~ "Celithimus spp.",
+      `Size Class` == "ERYSIM" ~ "E. simplicicollis",
+      `Size Class` == "LIBINC" ~ "L. incesta",
+      `Size Class` == "PALPAL" ~ "P. paludosus",
+      `Size Class` == "PELFEM" ~ "P. femoratus",
+      `Size Class` == "PROFAL" ~ "P. fallax",
+      `Size Class` == "PROALL" ~ "P. alleni",
+      `Size Class` == "PROSPP" ~ "Procambarus spp.",
+      TRUE ~ `Size Class`)) %>% 
+  mutate(across(where(is.numeric), round, digits = 2)) %>% 
+  select(Slough, Season, `Size Class`, NP, Pond, `NP < Pond`, `Percent Change`)
+
+#write this out to excel
+#write.xlsx(tsl.wet.np.pond.direct.pairwise, file = "tsl_wet_np_pond_SEAB_prob_diff.xlsx")
+```
+
+#### TSL dry marsh vs near pond
+```{r}
+tsl.dry.marsh.np.pairwise <- SEA.B.pairwise %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "TSL", Habitat == "Marsh", Season == "Dry") %>% 
+  #unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>% 
+  select(-c(Slough, Habitat, Season)) %>% 
+  column_to_rownames(var = "SizeClass") %>% 
+  t() %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "TSL", Habitat == "NP", Season == "Dry") %>% 
+  filter(SizeClass %in% colnames(.)) %>% 
+  select(Slough, Habitat, Season, SizeClass, matches(.$SizeClass)) %>% 
+  unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season", "SizeClass"), sep = "_") %>% 
+  column_to_rownames(var = "Slough_Habitat_Season_SizeClass")
+
+#format modes to bind with pairwise probs
+tsl.dry.marsh.np.modes.wide <- SEA.B.modes.matrix.t %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "Size Class"), sep = 3) %>% 
+  mutate(`Size Class` = gsub("^.", "", `Size Class`)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "TSL", Habitat %in%  c("Marsh", "NP"), Season == "Dry") %>% 
+  pivot_wider(id_cols = `Size Class`, names_from = Habitat, values_from = mode) %>% 
+  filter(!is.na(Marsh), !is.na(NP))
+
+tsl.dry.marsh.np.direct.pairwise <- tsl.dry.marsh.np.pairwise %>% as.matrix() %>% 
+  diag() %>% as.data.frame() %>% 
+  mutate(Slough_Habitat_Season_SizeClass = rownames(tsl.dry.marsh.np.pairwise)) %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season", "Size Class"), sep = "_") %>% 
+  filter(!`Size Class` %in% c("Green Algae", "FLOC", "PERMAT", "PEREPI")) %>% 
+  merge(., tsl.dry.marsh.np.modes.wide, by = "Size Class") %>% 
+  select(`Size Class`, contains("Marsh"), contains("NP"), everything()) %>% select(-c(Habitat)) %>% 
+  rename(`Marsh < NP` = ".") %>% 
+  mutate(#`Pre > Post` = 1 - `Pre < Post`,
+    Direction = case_when(
+      `Marsh < NP` >= 0.95 ~ "Decrease",
+      `Marsh < NP` < 0.05 ~ "Increase",
+      `Marsh < NP` > 0.05 | `Marsh < NP` < 0.95 ~ "No Change"),
+    `Percent Change` = ((NP-Marsh)/Marsh)*100,
+    `Size Class` = case_when(
+      `Size Class` == "AMPHIPOD" ~ "Amphipoda",
+      `Size Class` == "BELSPP" ~ "Belostoma spp.",
+      `Size Class` == "BLUE MITE" ~ "Hydrachnidia",
+      `Size Class` == "BRAGRA" ~ "B. gravida",
+      `Size Class` == "COPEPOD" ~ "Copepoda",
+      `Size Class` == "CHIRON" ~ "Chironomidae",
+      `Size Class` == "COENAG" ~ "Coenagrionidae",
+      `Size Class` == "CELSPP" ~ "Celithimus spp.",
+      `Size Class` == "ERYSIM" ~ "E. simplicicollis",
+      `Size Class` == "PALPAL" ~ "P. paludosus",
+      `Size Class` == "PELFEM" ~ "P. femoratus",
+      `Size Class` == "PROFAL" ~ "P. fallax",
+      `Size Class` == "PROALL" ~ "P. alleni",
+      `Size Class` == "PROSPP" ~ "Procambarus spp.",
+      TRUE ~ `Size Class`)) %>% 
+  mutate(across(where(is.numeric), round, digits = 2)) %>% 
+  select(Slough, Season, `Size Class`, Marsh, NP, `Marsh < NP`, `Percent Change`)
+
+#write this out to excel
+#write.xlsx(tsl.dry.marsh.np.direct.pairwise, file = "tsl_dry_marsh_np_SEAB_prob_diff.xlsx")
+
+```
+
+#### TSL dry marsh vs pond
+```{r}
+tsl.dry.marsh.pond.pairwise <- SEA.B.pairwise %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "TSL", Habitat == "Marsh", Season == "Dry") %>% 
+  #unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>% 
+  select(-c(Slough, Habitat, Season)) %>% 
+  column_to_rownames(var = "SizeClass") %>% 
+  t() %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "TSL", Habitat == "Pond", Season == "Dry") %>% 
+  filter(SizeClass %in% colnames(.)) %>% 
+  select(Slough, Habitat, Season, SizeClass, matches(.$SizeClass)) %>% 
+  unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season", "SizeClass"), sep = "_") %>% 
+  column_to_rownames(var = "Slough_Habitat_Season_SizeClass")
+
+#format modes to bind with pairwise probs
+tsl.dry.marsh.pond.modes.wide <- SEA.B.modes.matrix.t %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "Size Class"), sep = 3) %>% 
+  mutate(`Size Class` = gsub("^.", "", `Size Class`)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "TSL", Habitat %in%  c("Marsh", "Pond"), Season == "Dry") %>% 
+  pivot_wider(id_cols = `Size Class`, names_from = Habitat, values_from = mode) %>% 
+  filter(!is.na(Marsh), !is.na(Pond))
+
+tsl.dry.marsh.pond.direct.pairwise <- tsl.dry.marsh.pond.pairwise %>% as.matrix() %>% 
+  diag() %>% as.data.frame() %>% 
+  mutate(Slough_Habitat_Season_SizeClass = rownames(tsl.dry.marsh.pond.pairwise)) %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season", "Size Class"), sep = "_") %>% 
+  filter(!`Size Class` %in% c("Green Algae", "FLOC", "PERMAT", "PEREPI")) %>% 
+  merge(., tsl.dry.marsh.pond.modes.wide, by = "Size Class") %>% 
+  select(`Size Class`, contains("Marsh"), contains("Pond"), everything()) %>% select(-c(Habitat)) %>% 
+  rename(`Marsh < Pond` = ".") %>% 
+  mutate(#`Pre > Post` = 1 - `Pre < Post`,
+    Direction = case_when(
+      `Marsh < Pond` >= 0.95 ~ "Decrease",
+      `Marsh < Pond` < 0.05 ~ "Increase",
+      `Marsh < Pond` > 0.05 | `Marsh < Pond` < 0.95 ~ "No Change"),
+    `Percent Change` = ((Pond-Marsh)/Marsh)*100,
+    `Size Class` = case_when(
+      `Size Class` == "AMPHIPOD" ~ "Amphipoda",
+      `Size Class` == "BELSPP" ~ "Belostoma spp.",
+      `Size Class` == "BRAGRA" ~ "B. gravida",
+      `Size Class` == "COPEPOD" ~ "Copepoda",
+      `Size Class` == "CHIRON" ~ "Chironomidae",
+      `Size Class` == "COENAG" ~ "Coenagrionidae",
+      `Size Class` == "CELSPP" ~ "Celithimus spp.",
+      `Size Class` == "ERYSIM" ~ "E. simplicicollis",
+      `Size Class` == "LIBINC" ~ "L. incesta",
+      `Size Class` == "PALPAL" ~ "P. paludosus",
+      `Size Class` == "PELFEM" ~ "P. femoratus",
+      `Size Class` == "PLASCA" ~ "Planorbella spp.",
+      `Size Class` == "PROFAL" ~ "P. fallax",
+      `Size Class` == "PROALL" ~ "P. alleni",
+      `Size Class` == "PROSPP" ~ "Procambarus spp.",
+      TRUE ~ `Size Class`)) %>% 
+  mutate(across(where(is.numeric), round, digits = 2)) %>% 
+  select(Slough, Season, `Size Class`, Marsh, Pond, `Marsh < Pond`, `Percent Change`)
+
+#write this out to excel
+#write.xlsx(tsl.dry.marsh.pond.direct.pairwise, file = "tsl_dry_marsh_pond_SEAB_prob_diff.xlsx")
+```
+
+#### TSL dry near pond vs pond
+```{r}
+tsl.dry.np.pond.pairwise <- SEA.B.pairwise %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "TSL", Habitat == "NP", Season == "Dry") %>% 
+  #unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>% 
+  select(-c(Slough, Habitat, Season)) %>% 
+  column_to_rownames(var = "SizeClass") %>% 
+  t() %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "SizeClass"), sep = 3) %>% 
+  mutate(SizeClass = gsub("^.", "", SizeClass)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "TSL", Habitat == "Pond", Season == "Dry") %>% 
+  filter(SizeClass %in% colnames(.)) %>% 
+  select(Slough, Habitat, Season, SizeClass, matches(.$SizeClass)) %>% 
+  unite(Slough_Habitat_Season_SizeClass, c("Slough", "Habitat", "Season", "SizeClass"), sep = "_") %>% 
+  column_to_rownames(var = "Slough_Habitat_Season_SizeClass")
+
+#format modes to bind with pairwise probs
+tsl.dry.np.pond.modes.wide <- SEA.B.modes.matrix.t %>% as.data.frame() %>% 
+  rownames_to_column(var = "Slough_Habitat_Season_SizeClass") %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season_SizeClass"), sep = "_") %>%
+  separate(Season_SizeClass, into = c("Season", "Size Class"), sep = 3) %>% 
+  mutate(`Size Class` = gsub("^.", "", `Size Class`)) %>% 
+  mutate(Slough  = gsub("\\[[[0-9]+] ", "", Slough)) %>% 
+  filter(Slough == "TSL", Habitat %in%  c("NP", "Pond"), Season == "Dry") %>% 
+  pivot_wider(id_cols = `Size Class`, names_from = Habitat, values_from = mode) %>% 
+  filter(!is.na(NP), !is.na(Pond))
+
+tsl.dry.np.pond.direct.pairwise <- tsl.dry.np.pond.pairwise %>% as.matrix() %>% 
+  diag() %>% as.data.frame() %>% 
+  mutate(Slough_Habitat_Season_SizeClass = rownames(tsl.dry.np.pond.pairwise)) %>% 
+  separate(Slough_Habitat_Season_SizeClass, into = c("Slough", "Habitat", "Season", "Size Class"), sep = "_") %>% 
+  filter(!`Size Class` %in% c("Green Algae", "FLOC", "PERMAT", "PEREPI")) %>% 
+  merge(., tsl.dry.np.pond.modes.wide, by = "Size Class") %>% 
+  select(`Size Class`, contains("NP"), contains("Pond"), everything()) %>% select(-c(Habitat)) %>% 
+  rename(`NP < Pond` = ".") %>% 
+  mutate(#`Pre > Post` = 1 - `Pre < Post`,
+    Direction = case_when(
+      `NP < Pond` >= 0.95 ~ "Decrease",
+      `NP < Pond` < 0.05 ~ "Increase",
+      `NP < Pond` > 0.05 | `NP < Pond` < 0.95 ~ "No Change"),
+    `Percent Change` = ((Pond-NP)/NP)*100,
+    `Size Class` = case_when(
+      `Size Class` == "AMPHIPOD" ~ "Amphipoda",
+      `Size Class` == "BELSPP" ~ "Belostoma spp.",
+      `Size Class` == "BRAGRA" ~ "B. gravida",
+      `Size Class` == "COPEPOD" ~ "Copepoda",
+      `Size Class` == "CHIRON" ~ "Chironomidae",
+      `Size Class` == "COENAG" ~ "Coenagrionidae",
+      `Size Class` == "CELSPP" ~ "Celithimus spp.",
+      `Size Class` == "ERYSIM" ~ "E. simplicicollis",
+      `Size Class` == "LIBINC" ~ "L. incesta",
+      `Size Class` == "PALPAL" ~ "P. paludosus",
+      `Size Class` == "PELFEM" ~ "P. femoratus",
+      `Size Class` == "PROFAL" ~ "P. fallax",
+      `Size Class` == "PROALL" ~ "P. alleni",
+      `Size Class` == "PROSPP" ~ "Procambarus spp.",
+      TRUE ~ `Size Class`)) %>% 
+  mutate(across(where(is.numeric), round, digits = 2)) %>% 
+  select(Slough, Season, `Size Class`, NP, Pond, `NP < Pond`, `Percent Change`)
+
+#write this out to excel
+#write.xlsx(tsl.dry.np.pond.direct.pairwise, file = "tsl_dry_np_pond_SEAB_prob_diff.xlsx")
+```
+
+#### Combine habitat comparisons
+```{r}
+#Marsh-NP
+marsh.np.comparisons <- bind_rows(srs.wet.marsh.np.direct.pairwise, srs.dry.marsh.np.direct.pairwise, 
+                                  tsl.wet.marsh.np.direct.pairwise, tsl.dry.marsh.np.direct.pairwise)
+
+#proportion of statistical changes in marsh-np comparisons
+sum(marsh.np.comparisons$`Marsh < NP`>=0.95 | marsh.np.comparisons$`Marsh < NP`<=0.05)/nrow(marsh.np.comparisons) 
+
+#magnitude
+marsh.np.comparisons %>% 
+  filter(`Marsh < NP` >= 0.95 | `Marsh < NP` <= 0.05) %>% 
+  mutate(`Percent Change` = abs(`Percent Change`)) %>% 
+  summarize_at(.vars = "Percent Change", list(mean = mean, sd = sd))
+
+#Marsh-Pond
+marsh.pond.comparisons <- bind_rows(srs.wet.marsh.pond.direct.pairwise, srs.dry.marsh.pond.direct.pairwise, 
+                                    tsl.wet.marsh.pond.direct.pairwise, tsl.dry.marsh.pond.direct.pairwise)
+
+#proportion of statistical changes in marsh-pond comparisons
+sum(marsh.pond.comparisons$`Marsh < Pond`>=0.95 | marsh.pond.comparisons$`Marsh < Pond`<=0.05)/nrow(marsh.pond.comparisons) 
+
+#magnitude
+marsh.pond.comparisons %>% 
+  filter(`Marsh < Pond` >= 0.95 | `Marsh < Pond` <= 0.05) %>% 
+  mutate(`Percent Change` = abs(`Percent Change`)) %>% 
+  summarize_at(.vars = "Percent Change", list(mean = mean, sd = sd))
+
+#NP-Pond
+np.pond.comparisons <- bind_rows(srs.wet.np.pond.direct.pairwise, srs.dry.np.pond.direct.pairwise, 
+                                    tsl.wet.np.pond.direct.pairwise, tsl.dry.np.pond.direct.pairwise)
+
+#proportion of statistical changes in marsh-np comparisons
+sum(np.pond.comparisons$`NP < Pond`>=0.95 | np.pond.comparisons$`NP < Pond`<=0.05)/nrow(np.pond.comparisons) 
+
+#magnitude
+np.pond.comparisons %>% 
+  filter(`NP < Pond` >= 0.95 | `NP < Pond` <= 0.05) %>% 
+  mutate(`Percent Change` = abs(`Percent Change`)) %>% 
+  summarize_at(.vars = "Percent Change", list(mean = mean, sd = sd))
+
+#combine into a list and export to Excel
+habitat.comparisons <- list("Marsh-NP" = marsh.np.comparisons, "Marsh-Pond" = marsh.pond.comparisons, 
+                            "NP-Pond" = np.pond.comparisons)
+
+write.xlsx(habitat.comparisons, 
+           "Outputs/Stable Isotopes/Trophic Niche/Post-Invasion/habitat_comparisons.xlsx")
+
+#proportion of all habitat comparisons that were statistically different
+(
+  sum(marsh.np.comparisons$`Marsh < NP`>=0.95 | marsh.np.comparisons$`Marsh < NP`<=0.05)+
+  sum(marsh.pond.comparisons$`Marsh < Pond`>=0.95 | marsh.pond.comparisons$`Marsh < Pond`<=0.05)+
+  sum(np.pond.comparisons$`NP < Pond`>=0.95 | np.pond.comparisons$`NP < Pond`<=0.05)
+)/(
+  nrow(marsh.np.comparisons)+nrow(marsh.pond.comparisons)+nrow(np.pond.comparisons)
+)
+
+#magnitude
+bind_rows(
+  marsh.np.comparisons %>% rename(Comparisons = `Marsh < NP`),
+  marsh.pond.comparisons %>% rename(Comparisons = `Marsh < Pond`),
+  np.pond.comparisons %>% rename(Comparisons = `NP < Pond`)
+) %>%  filter(Comparisons >= 0.95 | Comparisons <= 0.05) %>% 
+  mutate(`Percent Change` = abs(`Percent Change`)) %>% 
+  summarize_at(.vars = "Percent Change", list(mean = mean, sd = sd))
+```
+
+# Pre- vs Post-Invasion SIBER
+## Load data
+```{r}
+pre.post.invasion.isotopes <- read.csv("Outputs/Stable Isotopes/pre_post_invasion_isotopes.csv")
+```
+
+## Format data for SIBER
+```{r}
+#format data for SIBER
+pre.post.siber.data <- pre.post.invasion.isotopes %>% select(-c(Sample_Type)) %>% 
+  rename(group = Species, iso1 = d13C, iso2 = d15N, community = Community) %>% 
+  select(iso1, iso2, group, community)
+
+#createSiberObject
+pre.post.siber<-createSiberObject(pre.post.siber.data)
+
+#write out samples sizes table
+write.csv(pre.post.siber[["sample.sizes"]] %>% t(), file = "Outputs/Stable Isotopes/siber_pre_post_iso_n_table.csv")
+
+# Create lists of plotting arguments to be passed onwards to each 
+# of the three plotting functions.
+community.hulls.args <- list(col = 1, lty = 1, lwd = 1)
+group.ellipses.args  <- list(n = 100, p.interval = 0.95, lty = 1, lwd = 2)
+group.hull.args      <- list(lty = 2, col = "grey20")
+
+par(mfrow=c(1,1))
+plotSiberObject(pre.post.siber,
+                ax.pad = 2, 
+                hulls = F, community.hulls.args, 
+                ellipses = T, group.ellipses.args,
+                group.hulls = T, group.hull.args,
+                bty = "L",
+                iso.order = c(1,2),
+                xlab = expression(paste(delta^{13}, "C (\u2030)")),
+                ylab = expression(paste(delta^{15}, "N (\u2030)"))
+)
+```
+
+## Calculate TA, SEA, SEAc
+```{r}
+#PALPAL post-invasion have some d13C values that seem like they're incorrect
+pre.post.ML <- groupMetricsML(pre.post.siber)
+print(pre.post.ML)
+#write.csv(t(pre.post.ML), file = "pre_post_ML.csv")
+```
+
+## Run SIBER model
+```{r}
+#use the same model parameters
+# fit the ellipses which uses an Inverse Wishart prior
+# on the covariance matrix Sigma, and a vague normal prior on the 
+# means. Fitting is via the JAGS method.
+pre.post.ellipses.posterior <- siberMVN(pre.post.siber, parms, priors)
+
+#calculate posterior estimates of ellipses for all groups
+pre.post.SEA.B<-siberEllipses(pre.post.ellipses.posterior)
+colnames(pre.post.SEA.B)<-names(pre.post.ellipses.posterior)
+```
+
+### Extract Output
+```{r}
+#calculate credibility intervals
+cr.p<-c(0.5, 0.95, 0.99) #vector of desired quantiles
+
+#call hdrcde_hdr using lapply()
+pre.post.SEA.B.credibles<-lapply(
+  as.data.frame(pre.post.SEA.B), 
+  function(x,...){tmp<-hdrcde::hdr(x)$hdr},
+  prob = cr.p)
+
+#match up group names
+names(pre.post.SEA.B.credibles)<-names(pre.post.ellipses.posterior)
+
+#this carries through the row names from matrices in SEA.B.credibles
+#they don't turn out all that clean though, so adding a column later with the same info
+pre.post.y <- do.call(function(...) {
+  tmp <- plyr::rbind.fill.matrix(...)
+  rownames(tmp) <- sapply(pre.post.SEA.B.credibles, function(i) {
+    rownames(i)
+  })
+  return(tmp)
+}, pre.post.SEA.B.credibles)
+
+pre.post.y
+
+#object with cleaned-up row names
+pre.post.interval<-rep(c("99%", "95%", "50%"), 32)
+
+#replicated each name three times in sequence to match up with new data frame
+pre.post.seab.names<-data.frame(rep(names(pre.post.SEA.B.credibles), each = 3))
+colnames(pre.post.seab.names)<-"names"
+
+#seab.names<-separate(seab.names, col = names, into = c('hab.season', 'spp'), extra = "merge")
+
+#combine names with new data frame
+pre.post.seab.cred.matrix<-data.frame(pre.post.seab.names, pre.post.interval, pre.post.y)
+colnames(pre.post.seab.cred.matrix)<-c(colnames(pre.post.seab.names), "interval", "lower", "upper")
+
+#write out to a csv
+write.csv(pre.post.seab.cred.matrix, 
+          file = "Outputs/Stable Isotopes/Trophic Niche/Pre-vs-Post-Invasion/pre_post_SEAB_credibles.csv", 
+          row.names = F)
+
+# do similar to get the modes, taking care to pick up multimodal posterior
+# distributions if present
+pre.post.SEA.B.modes<-lapply(
+  as.data.frame(pre.post.SEA.B), 
+  function(x,...){tmp<-hdrcde::hdr(x)$mode},
+  prob = cr.p, all.modes=T)
+
+#need to do the same as for the credible intervals to get the colnames to be
+#the names not the numbers
+write.csv(pre.post.SEA.B.modes, file = "Outputs/Stable Isotopes/Trophic Niche/Pre-vs-Post-Invasion/pre_post_SEAB_modes.csv")
+
+#read back in
+pre.post.SEA.B.modes.matrix<-read.csv(
+  file = "Outputs/Stable Isotopes/Trophic Niche/Pre-vs-Post-Invasion/pre_post_SEAB_modes.csv", 
+                                      header = T, row.names = 1)
+
+#change colnames
+colnames(pre.post.SEA.B.modes.matrix)<-names(pre.post.ellipses.posterior)
+#transpose this matrix
+pre.post.SEA.B.modes.matrix.t<-t(pre.post.SEA.B.modes.matrix) %>% as.data.frame()
+#change the name of what is now a single column to mode
+colnames(pre.post.SEA.B.modes.matrix.t)<-"Mode"
+#write out the final csv over the previous mode csv
+write.csv(pre.post.SEA.B.modes.matrix.t, 
+          file = "Outputs/Stable Isotopes/Trophic Niche/Pre-vs-Post-Invasion/pre_post_SEAB_modes.csv")
+
+# #test convergence for all ellipses
+# pre.post.all.files <- dir(parms$save.dir, full.names = T)
+# 
+# #find which onces are jags model files
+# pre.post.model.files <- pre.post.all.files[grep("jags_output", pre.post.all.files)]
+# 
+# #test convergence 
+# do.this <- 1 #this number indicates which file, in order, is being looked at
+# load(pre.post.model.files[do.this])
+# 
+# gelman.diag(output, multivariate = F)
+# gelman.plot(output, auto.layout = F)
+```
+
+### Pre- vs Post-Invasion Comparisons
+Calculate pairwise comparisons
+```{r}
+#turn the output into a list
+pre.post.SEA.B.list <- as.list(as.data.frame(pre.post.SEA.B))
+
+#use the pairwiseComparisons function from tRophicPosition package
+pre.post.pairwise <- pairwiseComparisons(pre.post.SEA.B.list, print = F)
+colnames(pre.post.pairwise) <- rownames(pre.post.pairwise)
+```
+
+Format data to have only pre- vs post-invasion comparisons
+```{r}
+#reformat data to have only pre-invasion and post-invasion comparisons
+pre.post.direct.pairwise <-
+  pre.post.pairwise %>% as.data.frame() %>%
+  rownames_to_column(var = "Invasion_Status_Spp") %>%
+  filter(grepl("Pre", Invasion_Status_Spp)) %>%
+  separate(
+    Invasion_Status_Spp,
+    into = c("Invasion_Status", "Species"),
+    sep = "[//.]"
+  ) %>%
+  arrange(Species) %>%
+  unite("Invasion_Status_Spp", c(Invasion_Status, Species)) %>%
+  column_to_rownames(var = "Invasion_Status_Spp") %>%
+  t() %>% as.data.frame() %>%
+  rownames_to_column(var = "Invasion_Status_Spp") %>%
+  filter(grepl("Post", Invasion_Status_Spp)) %>%
+  separate(
+    Invasion_Status_Spp,
+    into = c("Invasion_Status", "Species"),
+    sep = "[//.]"
+  ) %>%
+  arrange(Species) %>%
+  unite("Invasion_Status_Spp", c(Invasion_Status, Species)) %>%
+  column_to_rownames(var = "Invasion_Status_Spp") %>%
+  t() %>% as.data.frame()
+
+#format modes to bind with pairwise probs
+pre.post.modes.wide <- pre.post.SEA.B.modes.matrix.t %>%
+  rownames_to_column(var = "Invasion_Status_Spp") %>%
+  separate(
+    Invasion_Status_Spp,
+    into = c("Invasion_Status", "Species"),
+    sep = "[//.]"
+  ) %>%
+  pivot_wider(id_cols = Species,
+              names_from = Invasion_Status,
+              values_from = Mode) %>%
+  filter(!Species %in% c("Green Algae", "FLOC"))
+
+pre.post.direct.spp.pairwise <-
+  pre.post.direct.pairwise %>% as.matrix() %>%
+  diag() %>% as.data.frame() %>%
+  mutate(Species = rownames(pre.post.direct.pairwise)) %>%
+  separate(Species,
+           into = c("Invasion_Status", "Species"),
+           sep = "_") %>%
+  filter(!Species %in% c("Green Algae", "FLOC")) %>%
+  merge(., pre.post.modes.wide, by = "Species") %>%
+  select(Species, contains("Invasion"), everything()) %>% select(-c(Invasion_Status)) %>%
+  rename(`Pre < Post` = ".") %>%
+  mutate(
+    #`Pre > Post` = 1 - `Pre < Post`,
+    Direction = case_when(
+      `Pre < Post` >= 0.95 ~ "Decrease",
+      `Pre < Post` < 0.05 ~ "Increase",
+      `Pre < Post` > 0.05 | `Pre < Post` < 0.95 ~ "No Change"
+    ),
+    `Percent Change` = ((`Post-Invasion` - `Pre-Invasion`) / `Pre-Invasion`) *
+      100,
+    Species = case_when(
+      Species == "AMENAT" ~ "A. natalis",
+      Species == "ANISOP" ~ "Anisoptera",
+      Species == "BELSPP" ~ "Belostoma spp.",
+      Species == "CICURO" ~ "C. urophthalmus",
+      Species == "ERISUC" ~ "E. sucetta",
+      Species == "FUNCHR" ~ "F. chrysotus",
+      Species == "GAMHOL" ~ "G. holbrooki",
+      Species == "HETFOR" ~ "H. formosa",
+      Species == "LEPMAC" ~ "L. macrochirus",
+      Species == "LEPMIC" ~ "L. microlophus",
+      Species == "LEPPUN" ~ "L. punctatus",
+      Species == "PALPAL" ~ "P. paludosus",
+      Species == "POELAT" ~ "P. latipinna",
+      Species == "PROFAL" ~ "P. fallax"
+    )
+  ) %>%
+  mutate(across(where(is.numeric), round, digits = 2))
+
+#write this out to excel
+write.csv(pre.post.direct.spp.pairwise, 
+           file = "Outputs/Stable Isotopes/Trophic Niche/Pre-vs-Post-Invasion/pre_post_SEAB_prob_diff.csv")
+
+#proportion of statistical changes in pre-post comparisons
+sum(
+  pre.post.direct.spp.pairwise$`Pre < Post` >= 0.95 |
+    pre.post.direct.spp.pairwise$`Pre < Post` <= 0.05
+) / nrow(pre.post.direct.spp.pairwise)
+
+```
+
+### Plot pre- vs post-invasion shifts
+```{r}
+#reformat data to be able to make boxplots or violoin plots
+pre.post.plot.data <- pre.post.SEA.B %>% as.data.frame() %>% pivot_longer(everything(), names_to = c("Invasion Status", "Species"), 
+                                                         names_sep = "[//.]", values_to = "SEA_B") %>% 
+  filter(!Species %in% c("Green Algae", "FLOC", "PROFAL")) %>% 
+  mutate(Species = case_when(
+    Species == "AMENAT" ~ "A. natalis",
+    Species == "ANISOP" ~ "Anisoptera",
+    Species == "BELSPP" ~ "Belostoma spp.",
+    Species == "CICURO" ~ "C. urophthalmus",
+    Species =="ERISUC" ~ "E. sucetta", 
+    Species == "FUNCHR" ~ "F. chrysotus",
+    Species == "GAMHOL" ~ "G. holbrooki",
+    Species == "HETFOR" ~ "H. formosa",
+    Species == "LEPMAC" ~ "L. macrochirus",
+    Species == "LEPMIC" ~ "L. microlophus",
+    Species == "LEPPUN" ~ "L. punctatus",
+    Species == "PALPAL" ~ "P. paludosus",
+    Species == "POELAT" ~ "P. latipinna"))
+
+#plot these data
+windowsFonts(Times = windowsFont("Times New Roman"))
+
+(pre.post.seab<-ggplot(pre.post.plot.data %>% 
+                         mutate(`Invasion Status` = fct_reorder(`Invasion Status`, desc(`Invasion Status`))), 
+                       aes(x = Species, y = SEA_B, fill = `Invasion Status`))+
+  #geom_violin()+
+  geom_boxplot(outlier.size = 0,outlier.alpha = 0, lwd = 0.1)+
+  #facet_wrap(~Species)+
+  scale_color_viridis_d(aesthetics = "fill", option = "D", end = 0.75)+
+  scale_y_continuous(limits = c(0, 22))+
+  theme_bw(base_size = 8)+
+  xlab(NULL)+
+  ylab("Niche Area")+
+  annotate("text", x = 4, y = 3.75, label = "*", size = 2)+
+  annotate("text", x = 5, y = 8.5, label = "*", size = 2)+
+  annotate("text", x = 6, y = 8.25, label = "*", size = 2)+
+  annotate("text", x = 7, y = 21, label = "*", size = 2)+
+  annotate("text", x = 9, y = 1.75, label = "*", size = 2)+
+  annotate("text", x = 10, y = 3, label = "*", size = 2)+
+  annotate("text", x = 13, y = 11, label = "*", size = 2)+
+  theme(text = element_text(family = "Times", size = 5),
+        axis.text.x = element_text(angle = 45, vjust = 1.1, hjust = 1, size = 4),
+        panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"),
+        axis.ticks.x = element_line(size = 0.05),
+        axis.title = element_text(size = 5), axis.text.x.bottom = element_text(size = 3.5),
+        axis.text.y = element_text(size = 4), axis.ticks.y = element_line(size = 0.2),
+        legend.title = element_blank(), legend.text = element_text(size = 4),
+        legend.key.size = unit(0.75, "line"))
+
+)
+
+#ggsave(filename = "pre_post_SEAb.tiff", plot = pre.post.seab, dpi = 600, width = 84, height = 60, units = "mm")
+```
+
