@@ -1,0 +1,1082 @@
+---
+title: "08_energy_flux"
+author: "Peter Flood"
+date: "2022-07-01"
+output: 
+  html_document:
+    toc: true
+    df_print: paged
+    number_sections: true
+  html_notebook:
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Install libraries
+```{r}
+if (!require("tidyverse")) install.packages("tidyverse")
+if (!require("fluxweb")) install.packages("fluxweb")
+if (!require("igraph")) install.packages("igraph")
+if (!require("haven")) install.packages("haven")
+if (!require("viridis")) install.packages("viridis")
+if (!require("openxlsx")) install.packages("openxlsx")
+if (!require("ggpubr")) install.packages("ggpubr")
+```
+
+# Load libraries
+```{r}
+library(tidyverse)
+library(fluxweb)
+library(igraph)
+library(haven)
+library(viridis)
+library(openxlsx)
+library(ggpubr)
+```
+
+# Load data
+```{r}
+cray.length <- read_sas("Data/Energy Flux/crlen_1996_2022_p2.sas7bdat")
+fish.length <- read_sas("Data/Energy Flux/fslen_1996_2022_p2.sas7bdat")
+invt.count <- read_sas("Data/Energy Flux/invt_count_1996_2022_p2.sas7bdat")
+phys.data <- read_sas("Data/Energy Flux/phys_1996_2022_p2.sas7bdat")
+ef.pond.biomass <- read.csv("Data/Energy Flux/AH_FISH_BIOM_corrected_for_HOPLIT.csv")
+efish.marsh.biomass.2020 <- read_sas("Data/Energy Flux/efmarsh_fish_biom_2020.sas7bdat")
+```
+
+# Biomass conversions
+## Periphyton
+```{r}
+peri.afdm <- phys.data %>% 
+  select(REGION, YEAR, PERIOD, SITE, PLOT, THROW, PERI_VOL) %>% 
+  filter(REGION == "SRS", 
+           YEAR == 1998 & PERIOD %in% c(3, 4, 5) | 
+           YEAR == 1999 & PERIOD %in% c(1, 2) |
+           YEAR == 2018 & PERIOD %in% c(3, 4, 5) | 
+           YEAR == 2019 & PERIOD %in% c(1, 2)) %>% 
+  #create season variable
+  mutate(Season = case_when(
+    PERIOD %in% c(1, 2) ~ "Dry",
+    PERIOD %in% c(3, 4, 5) ~ "Wet"
+  )) %>% 
+  mutate(AFDM = 0.0219*PERI_VOL - 3.84) %>% #equation derived by Evelyn Gaiser and is in file "cerp_2005_2021_Report_2022_For Peter.xlsx"
+  group_by(YEAR, Season) %>% 
+  summarise(AFDM = mean(AFDM, na.rm = T)) %>% 
+  mutate(Guild = "Periphyton") %>% 
+  rename(Year = YEAR)
+```
+
+## Inverts
+```{r}
+#Note that our invert data also includes amphibians - I'll never understand why 
+
+#looking at row sums for different invert groups
+invt.sums <- invt.count %>% 
+  filter(REGION == "SRS", YEAR == 1998 & PERIOD %in% c(3, 4, 5) | 
+           YEAR == 1999 & PERIOD %in% c(1, 2) |
+           YEAR == 2018 & PERIOD %in% c(3, 4, 5) | 
+           YEAR == 2019 & PERIOD %in% c(1, 2)) %>% #only for the two years of data we're interested in
+  select(PELFEM:VILAMY) %>% 
+  colSums(na.rm = T)
+
+#view
+sort(invt.sums, decreasing = T)
+
+#based on this, drop taxa with less than 25 collected over the entire dataset
+abundance.25 <- invt.sums >= 25
+
+invt.count.com <- invt.count %>% 
+  filter(REGION == "SRS", YEAR == 1998 & PERIOD %in% c(3, 4, 5) | 
+           YEAR == 1999 & PERIOD %in% c(1, 2) |
+           YEAR == 2018 & PERIOD %in% c(3, 4, 5) | 
+           YEAR == 2019 & PERIOD %in% c(1, 2),) %>%
+  select(PELFEM:VILAMY)
+
+invt.count.no.rare <- invt.count.com[,abundance.25]
+
+invt.count.covariates <- invt.count %>% 
+  filter(REGION == "SRS", YEAR == 1998 & PERIOD %in% c(3, 4, 5) | 
+           YEAR == 1999 & PERIOD %in% c(1, 2) |
+           YEAR == 2018 & PERIOD %in% c(3, 4, 5) | 
+           YEAR == 2019 & PERIOD %in% c(1, 2),) %>%
+  select(-c(PELFEM:VILAMY))
+
+invt.count.covariates.no.rare <- bind_cols(invt.count.no.rare, invt.count.covariates)
+
+
+
+#binning groups we have in-house count to biomass conversions for to the matching levels
+#other taxa are being binned into groups from Benke et al. 1999
+
+invt.count.biomass <- invt.count.covariates.no.rare %>% 
+  select(-c(HYLATP, RANATP, SIRLAC, UNIDEN)) %>% #drop amphibians and unidentified inverts
+  filter(REGION == "SRS") %>% 
+  mutate( #combine CELEPO and CELSPP into a single group at the genus level
+    CELSPP = CELEPO + CELSPP
+  ) %>% 
+  #Now drop CELEPO column
+  select(-c(CELEPO)) %>% 
+  mutate(#convert counts per m^2 to grams per m^2
+    #derived from in-house estimates of count to wet weight conversions
+    BRAGRA=(BRAGRA*0.0480775862),
+    BELSPP=(BELSPP*0.1643188312),
+    CELSPP=(CELSPP*0.0494062112),
+    COENAG=(COENAG*0.0116),
+    COLEOA=(COLEOA*0.0277158537),
+    #EPHEME=(EPHEME*0.0048830189),
+    ERYSIM=(ERYSIM*0.0617573529),
+    HAISPP=(HAISPP*0.009256106),
+    LIBNEE=(LIBNEE*0.1241988095),
+    PALPAL=(PALPAL*0.0575045829),
+    PELFEM=(PELFEM*0.0228193431),
+    PLASPP=(PLASPP*0.117557626),
+    POMPAL=(POMPAL*8.329981322),
+    #values derived from literature that are in biomass_groupings_by_code_lists.xlsx
+    #biomass = count * aL^b (L = length, a and b are constants)
+    #ANISOP = (ANISOP*(0.0078*(25^2.792)))/1000, #need to convert from milligrams to grams so divide each by 1000
+    #CORIXI = (CORIXI*(0.0108*(8^2.734)))/1000,
+    GERRID = (GERRID*(0.0108*(4.9^2.734)))/1000,
+    HIRUDI = (HIRUDI*(0.104*(17.5^2.73)))/1000,
+    #TAPLOU = (TAPLOU*(0.0147*(20^3.626)))/1000
+    )
+
+invt.afdm <- invt.count.biomass %>% 
+  mutate(
+    #ANISOP = ANISOP*0.193,
+    BELSPP = BELSPP*0.246,
+    BRAGRA = BRAGRA*0.218,
+    CELSPP = CELSPP*0.218,
+    COENAG = COENAG*0.256,
+    COLEOA = COLEOA*0.283,
+    #CORIXI = CORIXI*0.246,
+    #EPHEME = EPHEME*0.212,
+    ERYSIM = ERYSIM*0.218,
+    GERRID = GERRID*0.246,
+    HAISPP = HAISPP*0.248,
+    HIRUDI = HIRUDI*0.192,
+    LIBNEE = LIBNEE*0.218,
+    PALPAL = PALPAL*0.212,
+    PELFEM = PELFEM*0.246,
+    PLASPP = PLASPP*0.248,
+    POMPAL = POMPAL*0.248#,
+    #TAPLOU = TAPLOU*0.153
+    ) %>% 
+  #drop other covariates besides year which we'll need later to separate 1997 and 2018
+  select(YEAR, PERIOD, #ANISOP, 
+         BELSPP, BRAGRA, CELSPP, COENAG, COLEOA, #CORIXI, EPHEME,
+         ERYSIM, GERRID, HAISPP, HIRUDI, LIBNEE, PALPAL, PELFEM, PLASPP, POMPAL#, TAPLOU
+         )
+
+invt.afdm.guild <- invt.afdm %>% 
+  #build guilds
+  mutate(Herb_Inverts = HAISPP + PLASPP + POMPAL,
+         Omni_Inverts = COLEOA,
+         Carn_Inverts = BELSPP + BRAGRA + CELSPP + COENAG + 
+                        ERYSIM +  GERRID + HIRUDI + LIBNEE + PELFEM,
+         Decapods = PALPAL) %>% 
+  #create season variable
+  mutate(Season = case_when(
+      PERIOD %in% c(1, 2) ~ "Dry",
+      PERIOD %in% c(3, 4, 5) ~ "Wet"
+  )) %>% 
+  rename(Year = YEAR) %>% 
+  #drop taxonomic groups and retain only guilds
+  select(Year, Season, Herb_Inverts, Omni_Inverts, Carn_Inverts, Decapods) %>% 
+  group_by(Year, Season) %>% 
+  summarise_all(mean, na.rm = T)
+```
+
+## Crayfish
+```{r}
+cray.biomass <- cray.length %>% 
+  filter(YEAR == 1998 & PERIOD %in% c(3, 4, 5) | 
+           YEAR == 1999 & PERIOD %in% c(1, 2) |
+           YEAR == 2018 & PERIOD %in% c(3, 4, 5) | 
+           YEAR == 2019 & PERIOD %in% c(1, 2),
+         SPECIES %in% c("PROALL", "PROFALL", "PROSPP", "NOCRAY"),
+         REGION == "SRS") %>% 
+  #Biomass = aL^b (as above) - then divide by 1000 to go from mg to g
+  mutate(Biomass = case_when(
+    SPECIES %in% c("PROALL", "PROSPP") ~ (0.217*(LENGTH^2.85))/1000,
+    SPECIES == "PROFALL" ~ (0192*(LENGTH^3.03))/1000, 
+    SPECIES == "NOCRAY" ~ 0
+  )) %>% 
+  group_by(YEAR, PERIOD, SITE, PLOT, THROW) %>% 
+  summarise(across(c(Biomass), sum, na.rm = T)) %>% 
+  #create season variable
+  mutate(Season = case_when(
+    PERIOD %in% c(1, 2) ~ "Dry",
+    PERIOD %in% c(3, 4, 5) ~ "Wet"
+  )) %>% 
+  select(-c(PERIOD)) %>% 
+  rename(Year = YEAR) %>% 
+  #convert to AFDM
+  mutate(Biomass = Biomass*0.208) %>% 
+  group_by(Year, Season) %>% 
+  summarise(across(c(Biomass), mean, na.rm = T)) %>% 
+  rename(Decapods = Biomass)
+```
+
+## Throw trap fishes
+```{r}
+tt.fish.biomass <- fish.length %>% 
+  filter(YEAR == 1998 & PERIOD %in% c(3, 4, 5) | 
+           YEAR == 1999 & PERIOD %in% c(1, 2) |
+           YEAR == 2018 & PERIOD %in% c(3, 4, 5) | 
+           YEAR == 2019 & PERIOD %in% c(1, 2),
+         !SPECIES %in% c("DRNFIS", "UNIFIS", "CENSPP", "ANGROS", "ATHSPP", "ICTPUN", ".", ""),
+         REGION == "SRS",
+         !COMMENT %in% c("PRTMIS", "FISREL", "RELESD")) %>% 
+  #Biomass derived from Kushlan and updated over the years by in-house estimates
+  #Note that ** is the same as ^
+  mutate(Biomass = case_when(
+    SPECIES == "ADIXEN" ~ (10**(-4.987+(3.319*log10(LENGTH)))),
+    SPECIES %in% c("AMENAT", "AMENEB", "HOPLIT") ~ (10**(-4.736+(3.046*log10(LENGTH)))),
+    SPECIES == "AMICAL" ~ (10**(-4.971+(2.989*log10(LENGTH*1.25)))),
+    SPECIES == "BELBEL" ~ (10**(-5.3651+(3.2229*log10(LENGTH)))),
+    SPECIES == "CLABAT" ~ (10**(-4.844+(2.920*log10(LENGTH)))),
+    SPECIES == "CICBIM" ~ (10**(-4.114+(2.912*log10(LENGTH)))),
+    SPECIES == "CICMAN" ~ (10**(-4.114+(2.912*log10(LENGTH)))),
+    SPECIES %in% c("CICURO", "CICSPP") ~ (10**(-4.7123+(3.1259*log10(LENGTH)))),
+    SPECIES == "CYPVAR" ~ (10**(-5.204+(3.543*log10(LENGTH)))),
+    SPECIES == "ELAEVE" ~ (10**(-4.581+(3.031*log10(LENGTH)))),
+    SPECIES == "ENNGLO" ~ (10**(-4.624+(3.113*log10(LENGTH)))),
+    SPECIES == "ERISUC" ~ (10**(-5.236+(3.305*log10(LENGTH)))),
+    SPECIES == "ESOAME" ~ (10**(- 5.824+(3.243*log10(LENGTH)))),
+    SPECIES == "ESONIG" ~ (10**(- 5.824+(3.243*log10(LENGTH)))),
+    SPECIES == "ESOSPP" ~ (10**(- 5.824+(3.243*log10(LENGTH)))),
+    SPECIES == "ETHFUS" ~ (10**(-5.686+(3.453*log10(LENGTH)))),
+    SPECIES == "FLOCAR" ~ (10**(-4.750+(3.186*log10(LENGTH)))),
+    SPECIES %in% c("FUNCHR", "FUNLIN", "GOBBOS", "FUNSPP") ~ (10**(-4.876+(3.131*log10(LENGTH)))),
+    SPECIES %in% c("FUNCON", "FUNCIN") ~ (10**(-4.526+(2.887*log10(LENGTH)))),
+    SPECIES == "FUNGRA" ~ (10**(-5.297+(3.366*log10(LENGTH)))),
+    SPECIES %in% c("FUNSEM", "FUNSIM") ~ (10**(-4.521+(2.822*log10(LENGTH)))),
+    SPECIES == "FUNRUB" ~ (10**(-4.526+(2.887*log10(LENGTH)))),
+    SPECIES == "GAMHOL" ~ (10**(-4.786+(3.032*log10(LENGTH)))),
+    SPECIES %in% c("HEMLET", "HEMBIM") ~ (10**(-4.6135+(3.0239*log10(LENGTH)))),
+    SPECIES == "HETFOR" ~ (10**(-4.837+(3.130*log10(LENGTH)))),
+    SPECIES == "JORFLO" ~ (10**(-4.643+(3.145*log10(LENGTH)))),
+    SPECIES == "LABSIC" ~ (10**(-5.290+(3.075*log10(LENGTH)))),
+    SPECIES == "LEPGUL" ~ (10**(-4.889+(3.224*log10(LENGTH)))),
+    SPECIES == "LEPMAC" ~ (10**(-5.100+(3.325*log10(LENGTH)))),
+    SPECIES %in% c("LEPMAR", "APHSAY") ~ (10**(-4.8111+(3.225*log10(LENGTH)))),
+    SPECIES == "LEPMIC" ~ (10**(-4.876+(3.198*log10(LENGTH)))),
+    SPECIES == "LEPPLA" ~ (10**(-6.344+(3.408*log10(LENGTH*1.25)))),
+    SPECIES == "LEPPUN" ~ (10**(-4.808+(3.222*log10(LENGTH)))),
+    SPECIES == "LEPSPP" ~ (10**(-4.699+(3.139*log10(LENGTH)))),
+    SPECIES %in% c("LUCGOO", "LEPOMM") ~ (10**(-4.782+(3.042*log10(LENGTH)))),
+    SPECIES == "LUCPAR" ~ (10**(-4.670+(2.980*log10(LENGTH)))),
+    SPECIES == "MACSIA" ~ (10**(-2.108+(2.808*log10(LENGTH)))),
+    SPECIES == "MENBER" ~ (10**(-5.089+(3.052*log10(LENGTH)))),
+    SPECIES == "MICSAL" ~ (10**(-5.203+(3.244*log10(LENGTH)))),
+    SPECIES == "MONALB" ~ (10**(-3.222+(3.112*log10(LENGTH)))),
+    SPECIES == "NOTCRY" ~ (10**(-4.974+(3.104*log10(LENGTH)))),
+    SPECIES == "NOTGYR" ~ (10**(-4.552+(2.947*log10(LENGTH)))),
+    SPECIES %in% c("NOTPET", "NOTMAC") ~ (10**(-5.540+(3.443*log10(LENGTH)))),
+    SPECIES %in% c("OREAUR", "TILMAR") ~ (10**(-4.114+(2.912*log10(LENGTH)))),
+    SPECIES == "POELAT" ~ (10**(-4.750+(3.142*log10(LENGTH)))),
+    #maintain sites where no fish were caught
+    SPECIES %in% c("UNIFIS", "HOLD") ~ 0
+  )) %>% 
+  mutate(AFDM = Biomass*0.19)
+  
+
+tt.fish.guild.afdm <- tt.fish.biomass %>% 
+  group_by(YEAR, PERIOD, SITE, PLOT, SPECIES) %>% 
+  summarise(across(c(AFDM), sum, na.rm = T)) %>% 
+  mutate(Season = case_when(
+    PERIOD %in% c(1, 2) ~ "Dry",
+    PERIOD %in% c(3, 4, 5) ~ "Wet")) %>% 
+  group_by(YEAR, Season, SPECIES) %>% 
+  summarise(across(c(AFDM), mean, na.rm = T)) %>% 
+  pivot_wider(names_from = SPECIES, values_from = AFDM) %>% 
+  mutate(across(where(is.numeric), replace_na, 0)) %>% 
+  mutate(
+    Sm_Fishes = APHSAY + CYPVAR + ELAEVE + ENNGLO + ETHFUS + ERISUC + ERYSUC + #ERYSUC must just be a typo
+                FUNCHR + FUNCON + GAMHOL + HETFOR + LABSIC + LUCGOO + 
+                LUCPAR + MENBER + NOTGYR + NOTMAC + JORFLO + POELAT,
+    Detritivores = TILMAR,
+    Mesopredators = AMENAT + AMENEB + ASTOCE + CICBIM + CICURO + CLABAT + HEMLET + 
+                     HOPLIT + LEPGUL + LEPMAC + LEPMAR + LEPMIC + LEPPUN + 
+                     LEPSPP + TRIMAC,
+    Piscivores = AMICAL + BELBEL + ESONIG + LEPPLA
+  ) %>% 
+  rename(Year = YEAR) %>% 
+  select(Year, Season, Detritivores, Sm_Fishes, Mesopredators, Piscivores)
+```
+
+## Electrofishing
+```{r}
+efish.areal.biomass <- efish.marsh.biomass.2020 %>% 
+  filter(YEAR == 1998 & PERIOD %in% c(3, 4, 5) | 
+           YEAR == 1999 & PERIOD %in% c(1, 2) |
+           YEAR == 2018 & PERIOD %in% c(3, 4, 5) | 
+           YEAR == 2019 & PERIOD %in% c(1, 2),
+         REGION == "SRS") %>% 
+  #Make the assumption that biomass CPUE is over the area of the whole plot (100m^2)
+  #divide by 100 to make it g/m^2
+  mutate(across(c(AMENAT:TOTFISHBIOM), ~./1000)) 
+
+  
+ef.marsh.afdm <- efish.areal.biomass %>% 
+  #convert to AFDM
+  mutate(across(c(AMENAT:TOTFISHBIOM), ~.*0.19)) %>% 
+  #create season variable
+  mutate(Season = case_when(
+    PERIOD %in% c(1, 2) ~ "Dry",
+    PERIOD %in% c(3, 4, 5) ~ "Wet")) %>% 
+  rename(Year = YEAR) %>% 
+  group_by(Year, Season) %>% 
+  summarise(across(c(AMENAT:TOTFISHBIOM), mean, na.rm = T))
+
+ef.marsh.afdm.guild <- ef.marsh.afdm %>% 
+  mutate(
+    Sm_Fishes = DIAPLU + ERISUC + FUNCHR + FUNCON + FUNSEM + NOTCRY + JORFLO,
+    Detritivores = OREAUR + TILMAR + PTEDIS + PTEMUL,
+    Mesopredators = AMENAT + AMENEB + ANGROS + ASTOCE + CICBIM + CICMAN +
+                     CICSPP + CICURO + CLABAT + HEMLET + HOPLIT + LEPGUL +
+                     LEPMAC + LEPMIC + LEPPUN + LEPSPP + LUTGRI + MACSIA + 
+                     MONALB,
+    Piscivores = AMICAL + BELBEL + CENUND + CICOCE + ESOAME + ESONIG + LEPPLA +
+                 MEGATL + MICSAL
+  ) %>% 
+  select(Year, Season, Detritivores, Sm_Fishes, Mesopredators, Piscivores)
+
+```
+
+## Combine datasets
+```{r}
+all.afdm <- bind_rows(
+  #make detritus afdm
+  tibble(Year = c(1998, 1999, 2018, 2019), Season = rep(c("Wet", "Dry"), times = 2),
+         Guild = rep("Detritus", 4), AFDM = rep(10, 4)),
+  peri.afdm,
+  invt.afdm.guild %>% pivot_longer(c(Herb_Inverts:Decapods), names_to = "Guild", values_to = "AFDM"),
+  cray.biomass %>% pivot_longer(Decapods, names_to = "Guild", values_to = "AFDM"),
+  tt.fish.guild.afdm %>% pivot_longer(c(Detritivores:Piscivores), names_to = "Guild", values_to = "AFDM"),
+  ef.marsh.afdm.guild %>% pivot_longer(c(Detritivores:Piscivores), names_to = "Guild", values_to = "AFDM")
+                      ) %>% 
+  group_by(Year, Season, Guild) %>% 
+  summarise(AFDM = sum(AFDM)) %>% 
+  arrange(Year, Season, Guild)
+```
+
+# Calculate metabolic losses
+## Constants
+```{r}
+#create constants to use later
+boltz <- 0.00008617343  # Boltzmann constant
+temp<-3.5 # mean temperature in degree celsius
+a <- -0.29 # allometric scaling (for biomass)
+E <- 0.69 # activation energy
+#set the normalization constant (intercept of body-mass metabolism scaling relationship)
+losses_param <- list("invertebrates"= 17.17,
+                     "ectotherm vertebrates" = 18.47,
+                     "Other"= 0)
+```
+
+## Fishes
+```{r}
+tt.fish.bm <- tt.fish.biomass %>% 
+  filter(SPECIES != "NOFISH") %>% 
+  mutate(Season = case_when(
+    PERIOD %in% c(1, 2) ~ "Dry",
+    PERIOD %in% c(3, 4, 5) ~ "Wet")) %>% 
+  rename(Year = YEAR, Species = SPECIES) %>% 
+  select(Year, Season, Species, Biomass) %>% 
+  group_by(Year, Season, Species) %>% 
+  summarise(bodymass = mean(Biomass, na.rm = T)) %>% 
+  filter(!is.na(bodymass)) 
+
+ef.fish.bm <- efish.areal.biomass %>% 
+  mutate(Season = case_when(
+    PERIOD %in% c(1, 2) ~ "Dry",
+    PERIOD %in% c(3, 4, 5) ~ "Wet")) %>% 
+  rename(Year = YEAR, Site = SITE) %>% 
+  select(Year, Season, Site, AMENAT:PTEDIS) %>% 
+  pivot_longer(cols = c(AMENAT:PTEDIS), values_to = "Biomass", names_to = "Species") %>% 
+  filter(Biomass != 0) %>% 
+  group_by(Year, Season, Species) %>% 
+  summarise(bodymass = mean(Biomass, na.rm = T))
+
+fish.losses <- bind_rows(tt.fish.bm, ef.fish.bm) %>% 
+  mutate(losses = exp((a * log(bodymass) + 18.47) - E/(boltz*(273.15+temp)))) %>% 
+  mutate(Guild = case_when(
+    Species %in%  c("APHSAY", "CYPVAR", "ELAEVE", "ENNGLO", "ETHFUS", "ERISUC", "ERYSUC", #ERYSUC must just be a typo
+                    "FUNCHR", "FUNCON", "GAMHOL", "HETFOR", "LABSIC", "LUCGOO", 
+                    "LUCPAR", "MENBER", "NOTGYR", "NOTMAC", "NOTPET", "JORFLO", "POELAT") ~ "Sm_Fishes",
+    Species %in%  c("OREAUR", "TILMAR") ~ "Detritivores",
+    Species %in% c("AMENAT", "AMENEB", "ASTOCE", "CICBIM", "CICURO", "CLABAT", "DIAPLU", "HEMLET", 
+                   "HOPLIT", "LEPGUL", "LEPMAC", "LEPMAR", "LEPMIC", "LEPPUN", 
+                   "LEPSPP", "MACSIA", "TRIMAC") ~ "Mesopredators",
+    Species %in% c("AMICAL", "BELBEL", "CENUND", "ESOAME", "ESONIG", "LEPPLA", "MICSAL") ~ "Piscivores"
+  )) %>% 
+  group_by(Year, Season, Guild) %>% 
+  summarize(losses = mean(losses))
+```
+## Crayfish
+```{r}
+cray.losses <- cray.length %>% 
+  filter(YEAR == 1998 & PERIOD %in% c(3, 4, 5) | 
+           YEAR == 1999 & PERIOD %in% c(1, 2) |
+           YEAR == 2018 & PERIOD %in% c(3, 4, 5) | 
+           YEAR == 2019 & PERIOD %in% c(1, 2),
+         SPECIES %in% c("PROALL", "PROFALL", "PROSPP"),
+         REGION == "SRS") %>% 
+  #Biomass = aL^b (as above) - then divide by 1000 to go from mg to g
+  mutate(Biomass = case_when(
+    SPECIES %in% c("PROALL", "PROSPP") ~ (0.217*(LENGTH^2.85))/1000,
+    SPECIES == "PROFALL" ~ (0192*(LENGTH^3.03))/1000, 
+    SPECIES == "NOCRAY" ~ 0
+  )) %>% 
+  mutate(Season = case_when(
+    PERIOD %in% c(1, 2) ~ "Dry",
+    PERIOD %in% c(3, 4, 5) ~ "Wet"
+  )) %>% 
+  select(-c(PERIOD)) %>% 
+  rename(Year = YEAR, Species = SPECIES) %>% 
+  group_by(Year, Season, Species) %>% 
+  summarise(bodymass = mean(Biomass, na.rm = T)) %>% 
+  mutate(Guild = "Decapods") %>% 
+  mutate(losses = exp((a * log(bodymass) + 18.47) - E/(boltz*(273.15+temp)))) %>% 
+  select(-c(bodymass, Species))
+```
+
+## Inverts
+```{r}
+invt.losses <- tibble(Species = rep(c("BRAGRA", "BELSPP", "CELSPP", "COENAG", "COLEOA", "ERYSIM", 
+                              "HAISPP", "LIBNEE", "PALPAL", "PELFEM", "PLASPP", "POMPAL",
+                              "GERRID", "HIRUDI"), times = 4),
+                  #These values are the constants from above to calculate biomass 
+                  bodymass = rep(c(0.0481, 0.1643, 0.0494, 0.0116, 0.0277, 0.0618, 
+                               0.0093, 0.1242, 0.0575, 0.0228, 0.1176, 8.330,
+                               0.0058, 0.0558), times = 4),
+                  Year = rep(c(1998, 1999, 2018, 2019), each = 14)) %>% 
+  mutate(losses = exp((a * log(bodymass) + 18.47) - E/(boltz*(273.15+temp))),
+         Guild = case_when(
+           Species %in% c("HAISPP", "PLASPP", "POMPAL") ~ "Herb_Inverts",
+                Species == "COLEOA" ~ "Omni_Inverts",
+                Species %in%  c("BELSPP", "BRAGRA", "CELSPP", "COENAG", 
+                  "ERYSIM",  "GERRID", "HIRUDI", "LIBNEE", "PELFEM") ~ "Carn_Inverts",
+                Species == "PALPAL" ~ "Decapods"),
+         Season = case_when(
+           Year %in% c(1999, 2019) ~ "Dry",
+           Year %in% c(1998, 2018) ~ "Wet")
+         ) %>% 
+  group_by(Year, Season, Guild) %>% 
+  bind_rows(cray.losses) %>% 
+  summarise(losses = mean(losses))
+```
+
+## Periphyton and detritus
+```{r}
+peri.detritus.losses <- tibble(Guild = rep(c("Periphyton", "Detritus"), each = 4),
+                               Year = rep(c(1998, 1999, 2018, 2019), times = 2),
+                               Season = rep(c("Wet", "Dry"), times = 4),
+                               losses = rep(2.692599e-13, 8))
+```
+
+## Combine losses 
+```{r}
+afdm.losses.efficies <- left_join(
+  bind_rows(invt.losses, fish.losses, peri.detritus.losses),
+  all.afdm, by = c("Year", "Season", "Guild")
+) %>% 
+  mutate(efficiencies = case_when(
+    Guild %in% c("Periphyton", "Detritus") ~ 0.4,
+    !Guild %in% c("Periphyton", "Detritus") ~ 0.906
+  ))
+```
+
+# Configure diet matrix
+Need to configure diet matrix to functional feeding groups
+
+## Load and configure diet matrix
+```{r}
+
+#load data
+full.diet.matrix <- read.csv(file = "Outputs/Stomach Contents/Diet/Pre-vs-Post-Invasion/pre_post_diet_matrix.csv")
+
+#configure to functional groups
+full.diet.matrix.guilds <- full.diet.matrix %>% 
+  mutate(Detritus = Detritus + Vasc.Plant,
+         Periphyton = Periphyton + Green.Algae,
+         Herb_Inverts = Collembola + Ephemeroptera + Mollusca,
+         Omni_Inverts = Amphipoda + Chironomid + Cladocera + Coleoptera + Copepoda + 
+           Diptera + Hymenoptera + Misc.Invert + Misc + Oligochaeta + Ostracoda + Trichoptera,
+         Carn_Inverts = Araneae + Argulus + Belo.Naucor + Hemiptera + Hydrachnidia + Odonata,
+         Decapods = Palaemonetes + Procambarus,
+         Sm_Fishes = Cyprinodontid + Misc.Fish,
+         Mesopredators = Centrarchid,
+         Detritivores = 0,
+         Piscivores = 0) %>% 
+  select(size_class, Invasion_Status, Habitat, Season, Detritus, Periphyton, Herb_Inverts,
+         Omni_Inverts, Carn_Inverts, Decapods, Sm_Fishes, Mesopredators, Detritivores, 
+         Piscivores) %>% 
+  #remove taxa that aren't fishes that we removed from biomass calculations
+  filter(!size_class %in% c("A.gry1", "N.flo1", "N.vir1", "P.axa1", "R.gry1", "R.gry2", "S.lac1")) %>% 
+  mutate(size_class = gsub("_", ".", size_class)) %>% #standardize size class abbreviations between pre- and post-invasion data
+  #ignoring size classes to build these guilds because biomass guilds ignore size class
+  #lumping at the species level
+  mutate(Guild = case_when(
+    size_class %in% c("O.aur1", "T.mar1") ~ "Detritivores",
+    size_class %in% c("A.xen1", "C.bim1", "C.var1", "E.eve1", "E.fus", "E.glo1", "E.suc1", "E.suc2", "E.suc3",
+                      "F.chr1", "F.chr2", "F.con1", "F.con2", "G.hol1", "G.hol2", "H.for1", "H.for2", "L.goo1",
+                      "L.goo2", "L.sic1", "N.cry1", "N.gyr1", "N.mac1", "N.pet1", "J.flo1", "J.flo2", "P.lat1", 
+                      "P.lat2") ~ "Sm_Fishes",
+    size_class %in% c("A.nat1", "A.nat2", "A.nat3", "A.nat4", "C.bat1", "C.man1", "C.uro1", "C.uro2", "H.let1",
+                      "H.lit1", "L.gul1", "L.gul2", "L.gul3", "L.gul4", "L.mac1", "L.mar1", "L.mic1", "L.mic2",
+                      "L.pun1", "L.pun2", "L.pun3", "M.alb4", "M.sia1") ~ "Mesopredators",
+    size_class %in% c("A.cal2", "B.bel1", "B.bel2", "C.oce1", "C.und1", "E.ame1", "L.pla1", "L.pla2", "M.sal1") ~ "Piscivores"
+  )) %>% 
+  filter(Habitat %in% c("Spikerush", "Marsh")) %>% #retain only marsh data to match biomass data (spikerush is pre-invasion marsh label)
+  group_by(Invasion_Status, Season, Guild) %>% 
+  summarise(across(c(Detritus:Piscivores), sum, na.rm = T)) %>% 
+  #create periphyton and detritus rows to make the matrix square
+  bind_rows(
+    tibble(
+      Invasion_Status = rep(c("Post-Invasion", "Pre-Invasion"), times = 4),
+      Season = rep(c("Wet", "Wet", "Dry", "Dry"), times = 2),
+      Guild = rep(c("Periphyton", "Detritus"), each = 4),
+      Detritus = rep(0, 8),
+      Periphyton = rep(0, 8),
+      Herb_Inverts = rep(0, 8),
+      Omni_Inverts = rep(0, 8),
+      Carn_Inverts = rep(0, 8),
+      Decapods = rep(0, 8),
+      Sm_Fishes = rep(0, 8),
+      Mesopredators = rep(0, 8),
+      Detritivores = rep(0, 8),
+      Piscivores = rep(0, 8)
+    )
+  ) %>% 
+  arrange(Invasion_Status, Season, Guild) %>% 
+  unite(c("Invasion_Status", "Season", "Guild"), col = "ID", sep = "_") %>% 
+  column_to_rownames("ID")
+```
+
+## Convert counts to proportions
+```{r}
+diet.matrix.proportions <- full.diet.matrix.guilds 
+
+row.sums <- apply(diet.matrix.proportions, 1, sum)
+#convert counts to proportions and create new matrix
+for (i in 1:nrow(diet.matrix.proportions)){
+  for (j in 1:ncol(diet.matrix.proportions)){
+    diet.matrix.proportions[i,j] <- diet.matrix.proportions[i,j]/row.sums[i]
+  }
+} 
+
+diet.matrix.proportions[is.na(diet.matrix.proportions)] <- 0
+```
+
+## Invert diets
+```{r}
+#need to create diet data for invert consumers
+#make some broad, null assumptions of equal contribution from potential prey sources
+diet.matrix.proportions.all <- diet.matrix.proportions %>% 
+  rownames_to_column(var = "ID") %>% 
+  separate(ID, into = c("Invasion_Status", "Season", "Guild"), sep = "_", extra = "merge") %>% 
+  bind_rows(
+    #Herb_Inverts
+    tibble(
+      Invasion_Status = rep(c("Post-Invasion", "Pre-Invasion"), times = 2),
+      Season = rep(c("Wet", "Dry"), each = 2),
+      Guild = rep("Herb_Inverts", 4),
+      Detritus = rep(0, 4),
+      Periphyton = rep(1, 4),
+      Herb_Inverts = rep(0, 4),
+      Omni_Inverts = rep(0, 4),
+      Carn_Inverts = rep(0, 4),
+      Decapods = rep(0, 4),
+      Sm_Fishes = rep(0, 4),
+      Mesopredators = rep(0, 4),
+      Detritivores = rep(0, 4),
+      Piscivores = rep(0, 4)
+    ),
+    #Omni_Inverts
+    tibble(
+      Invasion_Status = rep(c("Post-Invasion", "Pre-Invasion"), times = 2),
+      Season = rep(c("Wet", "Dry"), each = 2),
+      Guild = rep("Omni_Inverts", 4),
+      Detritus = rep(0.25, 4),
+      Periphyton = rep(0.25, 4),
+      Herb_Inverts = rep(0.25, 4),
+      Omni_Inverts = rep(0.25, 4),
+      Carn_Inverts = rep(0, 4),
+      Decapods = rep(0, 4),
+      Sm_Fishes = rep(0, 4),
+      Mesopredators = rep(0, 4),
+      Detritivores = rep(0, 4),
+      Piscivores = rep(0, 4)
+    ),
+    #Carn_Inverts
+    tibble(
+      Invasion_Status = rep(c("Post-Invasion", "Pre-Invasion"), times = 2),
+      Season = rep(c("Wet", "Dry"), each = 2),
+      Guild = rep("Carn_Inverts", 4),
+      Detritus = rep(0, 4),
+      Periphyton = rep(0, 4),
+      Herb_Inverts = rep(0.5, 4),
+      Omni_Inverts = rep(0.5, 4),
+      Carn_Inverts = rep(0, 4),
+      Decapods = rep(0, 4),
+      Sm_Fishes = rep(0, 4),
+      Mesopredators = rep(0, 4),
+      Detritivores = rep(0, 4),
+      Piscivores = rep(0, 4)
+    ),
+    #Decapods
+    tibble(
+      Invasion_Status = rep(c("Post-Invasion", "Pre-Invasion"), times = 2),
+      Season = rep(c("Wet", "Dry"), each = 2),
+      Guild = rep("Decapods", 4),
+      Detritus = rep(0.25, 4),
+      Periphyton = rep(0.25, 4),
+      Herb_Inverts = rep(0.25, 4),
+      Omni_Inverts = rep(0.25, 4),
+      Carn_Inverts = rep(0, 4),
+      Decapods = rep(0, 4),
+      Sm_Fishes = rep(0, 4),
+      Mesopredators = rep(0, 4),
+      Detritivores = rep(0, 4),
+      Piscivores = rep(0, 4)
+    )
+  ) %>% 
+  mutate(Guild = gsub("_", ". ", Guild),
+         Guild = gsub("Top.", "Top", Guild)
+         ) 
+
+colnames(diet.matrix.proportions.all)[2:13] <- gsub("_", ". ", colnames(diet.matrix.proportions.all)[2:13])
+```
+
+# Parition data per habitat, season, and invasion status
+```{r}
+diet.matrix.post.wet <- diet.matrix.proportions.all %>% 
+  filter(Invasion_Status == "Post-Invasion", Season == "Wet") %>% 
+  select(-c(Invasion_Status, Season)) %>% 
+  arrange(factor(Guild, levels = colnames(.))) %>% 
+  arrange(Guild) %>% 
+  column_to_rownames("Guild") %>% 
+  mutate(across(everything(), as.numeric)) %>% 
+  t() %>% as.data.frame() %>% 
+  rownames_to_column(var = "Guild") %>% 
+  arrange(Guild) %>% 
+  column_to_rownames(var = "Guild") %>% 
+  as.matrix()
+
+#write.csv(diet.matrix.post.wet, file = "diet_matrix_post_wet.csv", row.names = F)
+#diet.matrix.post.wet <- as.matrix(read.csv("diet_matrix_post_wet.csv"))
+
+
+diet.matrix.post.dry <- diet.matrix.proportions.all %>% 
+  filter(Invasion_Status == "Post-Invasion", Season == "Dry") %>% 
+  select(-c(Invasion_Status, Season)) %>% 
+  arrange(factor(Guild, levels = colnames(.))) %>% 
+  arrange(Guild) %>% 
+  column_to_rownames("Guild") %>% 
+  mutate(across(everything(), as.numeric)) %>% 
+  t() %>% as.data.frame() %>% 
+  rownames_to_column(var = "Guild") %>% 
+  arrange(Guild) %>% 
+  column_to_rownames(var = "Guild") %>% 
+  as.matrix()
+
+diet.matrix.pre.wet <- diet.matrix.proportions.all %>% 
+  filter(Invasion_Status == "Pre-Invasion", Season == "Wet") %>% 
+  select(-c(Invasion_Status, Season, Detritivores)) %>% 
+  arrange(factor(Guild, levels = colnames(.))) %>% 
+  arrange(Guild) %>% 
+  column_to_rownames("Guild") %>% 
+  mutate(across(everything(), as.numeric)) %>% 
+  t() %>% as.data.frame() %>% 
+  rownames_to_column(var = "Guild") %>% 
+  arrange(Guild) %>% 
+  column_to_rownames(var = "Guild") %>% 
+  as.matrix()
+
+diet.matrix.pre.dry <- diet.matrix.proportions.all %>% 
+  filter(Invasion_Status == "Pre-Invasion", Season == "Dry") %>% 
+  select(-c(Invasion_Status, Season, Detritivores)) %>% 
+  arrange(factor(Guild, levels = colnames(.))) %>% 
+  arrange(Guild) %>% 
+  column_to_rownames("Guild") %>% 
+  mutate(across(everything(), as.numeric)) %>%
+  t() %>% as.data.frame() %>% 
+  rownames_to_column(var = "Guild") %>% 
+  arrange(Guild) %>% 
+  column_to_rownames(var = "Guild") %>% 
+  as.matrix()
+
+afdm.losses.efficiencies.post.dry <- afdm.losses.efficies %>% 
+  filter(Year == 2019) %>% 
+  arrange(factor(Guild, levels = colnames(diet.matrix.post.dry))) %>% 
+  arrange(Guild)
+
+afdm.losses.efficiencies.post.wet <- afdm.losses.efficies %>% 
+  filter(Year == 2018) %>% 
+  arrange(factor(Guild, levels = colnames(diet.matrix.post.wet)))%>% 
+  arrange(Guild)
+
+afdm.losses.efficiencies.pre.dry <- afdm.losses.efficies %>% 
+  filter(Year == 1999, Guild != "Detritivores") %>% 
+  arrange(factor(Guild, levels = colnames(diet.matrix.pre.dry)))%>% 
+  arrange(Guild)
+
+afdm.losses.efficiencies.pre.wet <- afdm.losses.efficies %>% 
+  filter(Year == 1998, Guild != "Detritivores") %>% 
+  arrange(factor(Guild, levels = colnames(diet.matrix.pre.wet)))%>% 
+  arrange(Guild)
+```
+
+# Calculate fluxes
+```{r}
+fluxes.post.dry <- fluxing(diet.matrix.post.dry, 
+                           afdm.losses.efficiencies.post.dry$AFDM,
+                           afdm.losses.efficiencies.post.dry$losses,
+                           afdm.losses.efficiencies.post.dry$efficiencies,
+                           ef.level = "prey")
+
+fluxes.post.wet <- fluxing(diet.matrix.post.wet, 
+                           afdm.losses.efficiencies.post.wet$AFDM,
+                           afdm.losses.efficiencies.post.wet$losses,
+                           afdm.losses.efficiencies.post.wet$efficiencies,
+                           ef.level = "prey")
+
+
+fluxes.pre.dry <- fluxing(diet.matrix.pre.dry, 
+                           afdm.losses.efficiencies.pre.dry$AFDM,
+                           afdm.losses.efficiencies.pre.dry$losses,
+                           afdm.losses.efficiencies.pre.dry$efficiencies,
+                           ef.level = "prey")
+
+fluxes.pre.wet <- fluxing(diet.matrix.pre.wet, 
+                           afdm.losses.efficiencies.pre.wet$AFDM,
+                           afdm.losses.efficiencies.pre.wet$losses,
+                           afdm.losses.efficiencies.pre.wet$efficiencies,
+                           ef.level = "prey")
+
+write.xlsx(list("Post-Wet" = as.data.frame(fluxes.post.wet), "Post-Dry" = as.data.frame(fluxes.post.dry),
+                "Pre-Wet" = as.data.frame(fluxes.pre.wet), "Pre-Dry" = as.data.frame(fluxes.pre.dry)),
+           file = "Outputs/Energy Flux/pre_post_fluxes.xlsx")
+```
+
+## Heatmaps
+```{r}
+heatmap(log(fluxes.post.dry+1), Rowv = NA, Colv = NA, scale = "none")
+heatmap(log(fluxes.post.wet+1), Rowv = NA, Colv = NA, scale = "none")
+heatmap(log(fluxes.pre.dry+1), Rowv = NA, Colv = NA, scale = "none")
+heatmap(log(fluxes.pre.wet+1), Rowv = NA, Colv = NA, scale = "none")
+```
+
+## Food web plots
+```{r}
+netLW.post.dry <- graph_from_adjacency_matrix(fluxes.post.dry, weighted = T)
+netLW.post.wet <- graph_from_adjacency_matrix(fluxes.post.wet, weighted = T)
+netLW.pre.dry <- graph_from_adjacency_matrix(fluxes.pre.dry, weighted = T)
+netLW.pre.wet <- graph_from_adjacency_matrix(fluxes.pre.wet, weighted = T)
+
+#calculate arrow widths
+#first create some scalars
+Escale <- 15
+Emin <- 1
+
+wid.post.dry <- Emin+(sqrt(E(netLW.post.dry)$weight)/max(sqrt(E(netLW.post.dry)$weight))*Escale)
+wid.post.wet <- Emin+(sqrt(E(netLW.post.wet)$weight)/max(sqrt(E(netLW.post.wet)$weight))*Escale)
+wid.pre.dry <- Emin+(sqrt(E(netLW.pre.dry)$weight)/max(sqrt(E(netLW.pre.dry)$weight))*Escale)
+wid.pre.wet <- Emin+(sqrt(E(netLW.pre.wet)$weight)/max(sqrt(E(netLW.pre.wet)$weight))*Escale)
+
+#Remove the border of the frame
+V(netLW.post.dry)$frame.color = NA
+V(netLW.post.wet)$frame.color = NA
+V(netLW.pre.dry)$frame.color = NA
+V(netLW.pre.wet)$frame.color = NA
+
+#Visual representation parameter
+Vscale <- 25 #multiplying factor
+Vmin <- 1 #minimum size of the node
+#scale size of nodes
+afdm.post.dry.reset <- c(afdm.losses.efficiencies.post.dry$AFDM[1:3],
+                         min(afdm.losses.efficiencies.post.dry$AFDM), 
+                         afdm.losses.efficiencies.post.dry$AFDM[5:7],
+                         min(afdm.losses.efficiencies.post.dry$AFDM), 
+                         afdm.losses.efficiencies.post.dry$AFDM[9:10])
+nodmax.post.dry <- max(afdm.post.dry.reset)
+sizeB.post.dry <- (afdm.post.dry.reset/nodmax.post.dry)*Vscale+Vmin
+
+afdm.post.wet.reset <- c(afdm.losses.efficiencies.post.wet$AFDM[1:3],
+                         min(afdm.losses.efficiencies.post.wet$AFDM), 
+                         afdm.losses.efficiencies.post.wet$AFDM[5:7],
+                         min(afdm.losses.efficiencies.post.wet$AFDM), 
+                         afdm.losses.efficiencies.post.wet$AFDM[9:10])
+nodmax.post.wet <- max(afdm.post.wet.reset)
+sizeB.post.wet <- (afdm.post.wet.reset/nodmax.post.wet)*Vscale+Vmin
+
+afdm.pre.dry.reset <- c(afdm.losses.efficiencies.pre.dry$AFDM[1:2],
+                        min(afdm.losses.efficiencies.pre.dry$AFDM),
+                        afdm.losses.efficiencies.pre.dry$AFDM[4:6],
+                        min(afdm.losses.efficiencies.pre.dry$AFDM),
+                        afdm.losses.efficiencies.pre.dry$AFDM[8:9])
+nodmax.pre.dry <- max(afdm.pre.dry.reset)
+sizeB.pre.dry <- (afdm.pre.dry.reset/nodmax.pre.dry)*Vscale+Vmin
+
+afdm.pre.wet.reset <- c(afdm.losses.efficiencies.pre.wet$AFDM[1:2],
+                        min(afdm.losses.efficiencies.pre.wet$AFDM),
+                        afdm.losses.efficiencies.pre.wet$AFDM[4:6],
+                        min(afdm.losses.efficiencies.pre.wet$AFDM),
+                        afdm.losses.efficiencies.pre.wet$AFDM[8:9])
+nodmax.pre.wet <- max(afdm.pre.wet.reset)
+sizeB.pre.wet <- (afdm.pre.wet.reset/nodmax.pre.wet)*Vscale+Vmin
+
+#plot webs
+
+#create color palette 
+viridis(n = 10)
+
+guild.colors.no.detritivores <- c("#440154FF", "#482878FF", #"#3E4A89FF", 
+                                  "#31688EFF",
+                                  "#26828EFF", "#1F9E89FF", "#35B779FF", "#6DCD59FF",
+                                  "#B4DE2CFF", "#FDE725FF")
+
+guild.colors <- c("#440154FF", "#482878FF", "#3E4A89FF", "#31688EFF",
+                                  "#26828EFF", "#1F9E89FF", "#35B779FF","#6DCD59FF",
+                                  "#B4DE2CFF", "#FDE725FF")
+
+windowsFonts(Times = windowsFont("Times New Roman"))
+
+# tiff("Figures/Energy Flux/all_energy_flow_webs.tiff", width = 400, height = 300, units = "mm", res = 600)
+# 
+# par(mfrow = c(2,2))
+# par(mar = c(0,3,3,0), oma = c(0,1,1,0))
+# 
+# 
+# pre.wet.fw <- plotfw(netLW.pre.wet, edge.width = wid.pre.wet, edge.arrow.size = 1,
+#                      size = sizeB.pre.wet, col = guild.colors.no.detritivores, labcex = 2,
+#                      vertex.label.dist = 1.75, main = "Pre-Invasion Wet Season",
+#                      family = "Times", cex.main = 2, cex.axis = 2)
+# 
+# pre.dry.fw <- plotfw(netLW.pre.dry, edge.width = wid.pre.dry, edge.arrow.size = 1,
+#                       size = sizeB.pre.dry, col = guild.colors.no.detritivores, labcex = 2,
+#                       vertex.label.dist = 1.75, main = "Pre-Invasion Dry Season",
+#                      family = "Times", cex.main = 2)
+# 
+# post.wet.fw <- plotfw(netLW.post.wet, edge.width = wid.post.wet, edge.arrow.size = 1,
+#                       size = sizeB.post.wet, col = guild.colors, labcex = 2,
+#                       vertex.label.dist = 1.75, main = "Post-Invasion Wet Season",
+#                       family = "Times", cex.main = 2)
+# 
+# post.dry.fw <- plotfw(netLW.post.dry, edge.width = wid.post.dry, edge.arrow.size = 1,
+#                       size = sizeB.post.dry, col = guild.colors, labcex = 2,
+#                       vertex.label.dist = 1.75, main = "Post-Invasion Dry Season",
+#                       family = "Times", cex.main = 2)
+# 
+# 
+# dev.off()
+```
+
+# Pre- vs post-invasion changes in biomass
+```{r}
+pre.post.afdm.shifts <- bind_rows(
+  afdm.losses.efficiencies.post.dry,
+  afdm.losses.efficiencies.post.wet,
+  afdm.losses.efficiencies.pre.dry,
+  afdm.losses.efficiencies.pre.wet
+) %>% 
+  select(-c(losses, efficiencies)) %>% 
+  pivot_wider(names_from = c(Season, Year), values_from = AFDM) %>% 
+  mutate(wet.diff = ((Wet_2018 - Wet_1998)/Wet_1998)*100,
+         dry.dff = ((Dry_2019 - Dry_1999)/Dry_1999)*100
+  )
+
+write.csv(file = "Outputs/Energy Flux/pre_post_afdm_shifts.csv", pre.post.afdm.shifts)
+
+#changes in amount of energy through a given node
+# Estimate the fluxes per feeding guild
+# Compute the total out fluxes per node
+#pre.wet
+sumF.pre.wet <- sum(fluxes.pre.wet)
+# Compute the sum of the out-fluxes per species
+influx.pre.wet <- apply(fluxes.pre.wet,1,sum)
+
+# Aggregate per feeding guild and compute the percentage
+perF.pre.wet <- tapply(influx.pre.wet, rownames(fluxes.pre.wet),sum) / sumF.pre.wet *100
+
+# Visualize the proportion of out-fluxes per functional guild
+barplot(as.matrix(perF.pre.wet), col=viridis(n = 10), main = "Pre-Invasion Wet Season",
+        ylab="%", legend=TRUE, args.legend=list(x="center"))
+
+#pre.dry
+sumF.pre.dry <- sum(fluxes.pre.dry)
+# Compute the sum of the out-fluxes per species
+influx.pre.dry <- apply(fluxes.pre.dry,1,sum)
+
+# Aggregate per feeding guild and compute the percentage
+perF.pre.dry <- tapply(influx.pre.dry, rownames(fluxes.pre.dry),sum) / sumF.pre.dry *100
+
+# Visualize the proportion of out-fluxes per functional guild
+barplot(as.matrix(perF.pre.dry), col=viridis(n = 10), main = "Pre-Invasion Wet Season",
+        ylab="%", legend=TRUE, args.legend=list(x="center"))
+
+#post.wet
+sumF.post.wet <- sum(fluxes.post.wet)
+# Compute the sum of the out-fluxes per species
+influx.post.wet <- apply(fluxes.post.wet,1,sum)
+
+# Aggregate per feeding guild and compute the percentage
+perF.post.wet <- tapply(influx.post.wet, rownames(fluxes.post.wet),sum) / sumF.post.wet *100
+
+# Visualize the proportion of out-fluxes per functional guild
+barplot(as.matrix(perF.post.wet), col=viridis(n = 10), main = "Post-Invasion Wet Season",
+        ylab="%", legend=TRUE, args.legend=list(x="center"))
+
+#post.dry
+sumF.post.dry <- sum(fluxes.post.dry)
+# Compute the sum of the out-fluxes per species
+influx.post.dry <- apply(fluxes.post.dry,1,sum)
+
+# Aggregate per feeding guild and compute the percentage
+perF.post.dry <- tapply(influx.post.dry, rownames(fluxes.post.dry),sum) / sumF.post.dry *100
+
+# Visualize the proportion of out-fluxes per functional guild
+barplot(as.matrix(perF.post.dry), col=viridis(n = 10), main = "Post-Invasion Dry Season",
+        ylab="%", legend=TRUE, args.legend=list(x="center"))
+
+#joint plot using ggplot to facilitate common legend
+#join data from different invasion-season levels
+perF.all <- bind_rows(perF.pre.wet %>% as.data.frame() %>% rownames_to_column(var = "Guild") %>% 
+                        #filter(!Guild %in% c("Piscivores", "Detritivores")) %>% 
+                        mutate("Invasion_Season" = "Pre-Wet"), 
+                      perF.pre.dry%>% as.data.frame() %>% rownames_to_column(var = "Guild") %>% 
+                        #filter(!Guild %in% c("Piscivores", "Detritivores"))%>% 
+                        mutate("Invasion_Season" = "Pre-Dry"), 
+                      perF.post.wet%>% as.data.frame() %>% rownames_to_column(var = "Guild") %>% 
+                        #filter(!Guild %in% c("Piscivores", "Detritivores"))%>% 
+                        mutate("Invasion_Season" = "Post-Wet"), 
+                      perF.post.dry%>% as.data.frame() %>% rownames_to_column(var = "Guild") %>% 
+                        #filter(!Guild %in% c("Piscivores", "Detritivores"))%>% 
+                        mutate("Invasion_Season" = "Post-Dry")) %>% 
+  rename("Flux" = ".") #%>% 
+  #pivot_wider(names_from = "Guild", values_from = "Flux")
+
+#make the plot
+
+windowsFonts(Times = windowsFont("Times New Roman"))
+
+(percent.flux.plot <- qplot(data = perF.all , x = Invasion_Season, y = Flux, fill = Guild, geom = "col")+
+  scale_fill_viridis_d()+
+  scale_y_continuous(expand = c(0,0))+
+  scale_x_discrete(limits = c("Pre-Wet", "Pre-Dry", "Post-Wet", "Post-Dry"))+
+  xlab(NULL)+
+  ylab("Proportion of Total Energy Flux")+
+  ggtitle("Energy Outflux")+
+  theme_bw()+
+  theme(text = element_text(family = "Times"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+  
+)    
+
+# ggsave(filename = "outflow_proportional_fluxes.tiff", plot = percent.flux.plot, dpi = 600, 
+#        width = 200, height = 100, units = "mm")
+  
+
+#proportional inflow fluxes
+sumoutflux.pre.wet <- sum(fluxes.pre.wet)
+# Compute the sum of the out-fluxes per species
+outflux.pre.wet <- apply(fluxes.pre.wet,2,sum)
+
+# Aggregate per feeding guild and compute the percentage
+peroutflux.pre.wet <- tapply(outflux.pre.wet, rownames(fluxes.pre.wet),sum) / sumoutflux.pre.wet *100
+
+# Visualize the proportion of out-fluxes per functional guild
+barplot(as.matrix(peroutflux.pre.wet), col=viridis(n = 10), main = "Pre-Invasion Wet Season",
+        ylab="%", legend=TRUE, args.legend=list(x="center"))
+
+#pre.dry
+sumoutflux.pre.dry <- sum(fluxes.pre.dry)
+# Compute the sum of the out-fluxes per species
+outflux.pre.dry <- apply(fluxes.pre.dry,2,sum)
+
+# Aggregate per feeding guild and compute the percentage
+peroutflux.pre.dry <- tapply(outflux.pre.dry, rownames(fluxes.pre.dry),sum) / sumoutflux.pre.dry *100
+
+# Visualize the proportion of out-fluxes per functional guild
+barplot(as.matrix(peroutflux.pre.dry), col=viridis(n = 10), main = "Pre-Invasion Wet Season",
+        ylab="%", legend=TRUE, args.legend=list(x="center"))
+
+#post.wet
+sumoutflux.post.wet <- sum(fluxes.post.wet)
+# Compute the sum of the out-fluxes per species
+outflux.post.wet <- apply(fluxes.post.wet,2,sum)
+
+# Aggregate per feeding guild and compute the percentage
+peroutflux.post.wet <- tapply(outflux.post.wet, rownames(fluxes.post.wet),sum) / sumoutflux.post.wet *100
+
+# Visualize the proportion of out-fluxes per functional guild
+barplot(as.matrix(peroutflux.post.wet), col=viridis(n = 10), main = "Post-Invasion Wet Season",
+        ylab="%", legend=TRUE, args.legend=list(x="center"))
+
+#post.dry
+sumoutflux.post.dry <- sum(fluxes.post.dry)
+# Compute the sum of the out-fluxes per species
+outflux.post.dry <- apply(fluxes.post.dry,2,sum)
+
+# Aggregate per feeding guild and compute the percentage
+peroutflux.post.dry <- tapply(outflux.post.dry, rownames(fluxes.post.dry),sum) / sumoutflux.post.dry *100
+
+# Visualize the proportion of out-fluxes per functional guild
+barplot(as.matrix(peroutflux.post.dry), col=viridis(n = 10), main = "Post-Invasion Dry Season",
+        ylab="%", legend=TRUE, args.legend=list(x="center"))
+
+#joint plot using ggplot to facilitate common legend
+#join data from different invasion-season levels
+peroutflux.all <- bind_rows(peroutflux.pre.wet %>% as.data.frame() %>% rownames_to_column(var = "Guild") %>% 
+                        #filter(!Guild %in% c("Piscivores", "Detritivores")) %>% 
+                        mutate("Invasion_Season" = "Pre-Wet"), 
+                      peroutflux.pre.dry%>% as.data.frame() %>% rownames_to_column(var = "Guild") %>% 
+                        #filter(!Guild %in% c("Piscivores", "Detritivores"))%>% 
+                        mutate("Invasion_Season" = "Pre-Dry"), 
+                      peroutflux.post.wet%>% as.data.frame() %>% rownames_to_column(var = "Guild") %>% 
+                        #filter(!Guild %in% c("Piscivores", "Detritivores"))%>% 
+                        mutate("Invasion_Season" = "Post-Wet"), 
+                      peroutflux.post.dry%>% as.data.frame() %>% rownames_to_column(var = "Guild") %>% 
+                        #filter(!Guild %in% c("Piscivores", "Detritivores"))%>% 
+                        mutate("Invasion_Season" = "Post-Dry")) %>% 
+  rename("Flux" = ".") #%>% 
+#pivot_wider(names_from = "Guild", values_from = "Flux")
+
+#make the plot
+
+windowsFonts(Times = windowsFont("Times New Roman"))
+
+(percent.flux.inflow.plot <- qplot(data = peroutflux.all, x = Invasion_Season, y = Flux, fill = Guild, geom = "col")+
+    scale_fill_viridis_d()+
+    scale_y_continuous(expand = c(0,0))+
+    scale_x_discrete(limits = c("Pre-Wet", "Pre-Dry", "Post-Wet", "Post-Dry"))+
+    xlab(NULL)+
+    ylab("Proportion of Total Energy Flux")+
+    ggtitle("Energy Influx")+
+    theme_bw()+
+    theme(text = element_text(family = "Times"),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank())
+  
+)    
+
+# ggsave(filename = "inflow_proportional_fluxes.tiff", plot = percent.flux.inflow.plot, dpi = 600, 
+#        width = 200, height = 100, units = "mm")  
+
+inflow.outflow.fluxes <- ggarrange(percent.flux.plot, percent.flux.inflow.plot, ncol = 1,
+                                   nrow = 2, common.legend = T, legend = "right", 
+                                   labels = "AUTO")
+inflow.outflow.fluxes    
+    
+ggsave("Figures/Energy Flux/inflow_outflow_fluxes_reorder.tiff", plot = inflow.outflow.fluxes, dpi = 600,
+       width = 125, height = 200, units = "mm")
+    
+```
